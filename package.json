@@ -1,0 +1,25 @@
+{
+  "name": "nothingtodo",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "check": "tsc --noEmit",
+    "check:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
+    "test:core": "cargo test -p nothingtodo-core",
+    "test:sync": "node scripts/test-sync.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-notification": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "vite": "^8.0.16",
+    "typescript": "~6.0.3"
+  }
+}
