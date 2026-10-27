@@ -4,7 +4,7 @@ A local-first todo and reminder app for **Linux and Android**, built with Tauri 
 
 Implemented: create/edit/complete/delete tasks, optional reminder dates, ten-minute snooze, SQLite persistence, automatic Astraea Sync, pending offline changes, and explicit local/server conflict choices.
 
-**Reminders currently run only while the app process is active.** Overdue reminders are checked on restart. This is a working foundation, not yet a reliable background alarm app. Android native scheduling and Linux background operation are the next milestone.
+**Reminders currently run only while the app process is active.** Overdue reminders are checked on restart. This is a working foundation, not yet a reliable background alarm app. The next work is to finalize the app identity, prove Android builds on a phone, and add migrations, recovery and forward-compatible sync. Protected credentials and responsive sync must be in place before the native reminder milestone; see the [revised roadmap](docs/development.md#revised-milestones).
 
 ## Run on Linux
 
@@ -34,7 +34,7 @@ npm run tauri android dev
 npm run tauri android build
 ```
 
-Choose a stable app identifier before publishing; the starter uses `dev.astraea.nothingtodo`. Android project generation has not been completed on this machine because Java/Android tooling is missing. The shared Rust library includes Tauri's mobile entry point. Once generated, commit the Android source project, leaving SDK paths and signing secrets untracked. Test on an actual Android device, including notification permission denial, process death and timezone changes.
+Choose the final app identifier **before running `tauri android init`**; the starter uses `dev.astraea.nothingtodo` and the final identifier has not been selected. Changing it later changes the data directory and Android package identity, so existing data needs an explicit migration. Android project generation has not been completed on this machine because Java/Android tooling is missing. The shared Rust library includes Tauri's mobile entry point. Once generated, commit the Android source project, leaving SDK paths and signing secrets untracked. Test on an actual Android device, including notification permission denial, process death and timezone changes.
 
 A physical phone cannot reach your computer's `localhost` backend. The development sync client permits plain HTTP only to loopback; use `adb reverse tcp:8787 tcp:8787` with the local Worker, or an HTTPS development endpoint. The `nothingtodo` app namespace is the same on both platforms.
 
@@ -49,7 +49,7 @@ The contract comes from [Astraea Sync](https://github.com/astraea-oss/astraea-sy
 
 Failed attempts retry with exponential backoff from 5 seconds up to 5 minutes. Further edits preserve that backoff; returning online, reconnecting or clicking **Sync now** requests an immediate attempt. The sync status shows progress, the last successful sync and failures. Automatic sync requires a running app process; Android may suspend it in the background.
 
-The token is held in Rust memory for the session and cleared from the input after connection. It is never written to SQLite or browser storage. You must reconnect after restarting; automatic sync starts as soon as you reconnect. Never commit tokens or paste them into chat. Persistent credentials using Linux Secret Service / Android Keystore are planned.
+The token is held in Rust memory for the session and cleared from the input after connection. It is never written to SQLite or browser storage. You must reconnect after restarting; automatic sync starts as soon as you reconnect. Never commit tokens or paste them into chat. Protected credential storage is an early milestone: Linux Secret Service with a session-only fallback when unavailable, and token encryption using an Android Keystore-backed key. Plaintext token storage is not a fallback.
 
 A local profile binds to its first successful server/token combination to prevent accidental cross-account uploads. Different devices should currently use the same personal account token. Token rotation, account switching and profile migration need an explicit UI before this restriction can be relaxed. Keep your original token available privately. The stored binding is a SHA-256 fingerprint, not the token itself.
 
@@ -65,4 +65,10 @@ npm run test:sync -- ../astraea-sync
 
 `test:sync` needs the backend's npm dependencies installed. It bundles the backend with Wrangler's **dry-run**, starts an ephemeral local Miniflare/D1 instance, and tests the real HTTP contract with disposable fixture credentials. It never deploys or uses production credentials. Coverage includes two-device conflicts, deletion, pagination beyond 100 changes and authorization failure retention. CI runs the standalone checks and Linux build; the private sibling backend integration is run locally.
 
-See [development notes](docs/development.md) for boundaries and the next milestones.
+## Roadmap and data recovery
+
+The [revised roadmap](docs/development.md#revised-milestones) prioritizes app identity, a real-device Android build, numbered database migrations, export/import and preservation of unsupported records. Protected credentials and removing network calls from storage locks come before native alarms. Storage normalization, field-level conflict merging and recurrence follow those safety foundations. Styling can proceed independently.
+
+Currently, an unsupported task schema or record key stops sync rather than being preserved as opaque data. The database has no numbered migration system or export/import UI yet. Task data is stored unencrypted; full database encryption at rest remains an explicit product decision, separate from protected credential storage. For now, close the app and copy its entire data directory, including any SQLite WAL files, for a local backup. See [development notes](docs/development.md#boundaries) for its location. Treat backups as private data.
+
+Native Android delivery will not imply continuous sync: periodic background work can be delayed and cannot reproduce the active-process 30-second interval. A device that has not received a completion or deletion can still fire an outdated alarm. Missed-reminder, multiple-device and snooze rules must be decided before implementing the native adapters.
