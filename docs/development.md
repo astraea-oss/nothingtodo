@@ -9,9 +9,11 @@
 
 Keep task rules, sync and persistence in Rust. Keep the frontend focused on presentation. Native alarm scheduling should be behind a platform adapter rather than implemented with frontend timers.
 
-SQLite currently stores a versioned task model and all local sync metadata in one atomic JSON snapshot row. This keeps the first implementation small and commits each change-feed page together with its cursor. It suits a personal prototype; a future migration can normalize records and outbox rows for larger datasets. Compare-and-swap writes reject stale app processes rather than silently overwriting newer data. Back up the database before schema changes. Task payloads have a schema version, but the local database and snapshot do not yet have a migration version. There is no export/import UI yet. Numbered migrations and a recoverable backup are prerequisites for persisted format changes; forward-compatible storage precedes the new versioned export/import format.
+SQLite currently stores a versioned task model and all local sync metadata in one atomic JSON snapshot row in the `snapshot` table. This keeps the first implementation small and commits each change-feed page together with its cursor. It suits a personal prototype; a future migration can normalize records and outbox rows for larger datasets. Compare-and-swap writes reject stale app processes rather than silently overwriting newer data. `crates/core/src/migrations.rs` holds numbered migrations; `PRAGMA user_version` records the applied version. Opening runs all pending migrations and a decode of the result in one transaction, and refuses newer versions before writing anything (including the journal mode). Each write checks the version inside its transaction, so an instance left running after a newer migration cannot save. Migrations transform stored JSON rather than decoding it with current types, so they keep working as the model changes. Before migrating existing data the app writes an untouched `VACUUM INTO` copy named `<db>.backup-v<N>-<unix ms>`. It never overwrites an earlier backup.
 
-The database is `nothingtodo.sqlite3` in Tauri's per-user app data directory (`$XDG_DATA_HOME/dev.astraea.nothingtodo` on Linux, normally `~/.local/share/dev.astraea.nothingtodo`). It contains private task data in plaintext. Full database encryption at rest is an open product decision, assigned to milestone 2 before credential implementation is finalized; it is not an implemented guarantee. Protected token storage is a separate requirement; if database encryption is adopted, its key recovery and backup behavior must be defined too. SQLite WAL files can contain recent edits too; close the app before copying the whole database directory.
+Version 1 moved the snapshot from `app_state` into `snapshot`, added a per-record `localRevision` that every local edit increments, and replaced `app_state` with an upgrade-required sentinel that the pre-migration `Snapshot` decoder rejects. It also added triggers that abort any insert, update or delete on `app_state`. Tests use a frozen copy of the previous storage code to check that a connection opened before migration cannot write, that failed migrations roll back completely, and that a restored legacy backup is migrated and guarded again. Any future migration that changes the snapshot format must similarly prevent version-1 binaries from saving; the in-transaction version check already does this for binaries that include it. There is no export/import UI yet; forward-compatible storage precedes the versioned export/import format.
+
+The database is `nothingtodo.sqlite3`. On Linux it lives in a `NothingToDo Data` folder beside the executable (beside the `.AppImage` file for AppImages; `target/debug/NothingToDo Data` in development), together with WebKit's data in `webview/`. Android uses its private app data directory. It contains private task data in plaintext. Full database encryption at rest is an open product decision, assigned to milestone 2 before credential implementation is finalized; it is not an implemented guarantee. Protected token storage is a separate requirement; if database encryption is adopted, its key recovery and backup behavior must be defined too. SQLite WAL files can contain recent edits too; close the app before copying the whole database directory.
 
 ## Sync rules
 
@@ -19,13 +21,13 @@ Each task UUID is one key in `v1/apps/nothingtodo/settings`; payloads include `s
 
 A new client replays `/changes?after=0`. The client applies each page and commits its cursor together before fetching the next. It pulls before pushing pending records with their original `baseVersion`. Both change-feed divergence and HTTP 409 preserve local edits for explicit resolution. Matching server values reconcile uncertain write acknowledgements only after replaying the entire feed, so an old matching event cannot erase a pending edit. Network failures retain pending changes for automatic retry. Unknown schemas stop replay without advancing the affected page's cursor.
 
-Sync and local edits share one mutex in the native shell. This avoids acknowledging an older write over a new local edit, but long sync operations can delay editing and reminders. Releasing the lock around network I/O, with local revision checks on acknowledgement, is an early correctness fix; it must not wait for storage normalization. A single native worker owns all sync attempts. It coalesces edits within 750ms, polls every 30 seconds and retries failures with 5s–300s exponential backoff. Edits during an outage preserve the retry deadline; connect/manual/online/foreground signals request an immediate attempt. Startup sync requires reconnecting because credentials remain session-only. Sync status is held in Rust and emitted to the UI. There is no E2E encryption, signup, push delivery or server-scheduled alarm logic.
+Sync never holds the store mutex across a network request. It captures the cursor or pending uploads (with each record's `localRevision`), releases the lock, performs the request, then commits under the lock. An acknowledgement for a record edited during the request advances only its base version and keeps the newer edit pending; a page is refused if the cursor moved. Each `sync` call applies at most 20 feed pages and returns `MoreHistory`, so a long first download proceeds in passes the worker resumes immediately. The session lives in an `Arc` so connecting or disconnecting never waits for a request. Replacing a session cancels the previous one while holding the store lock, and a cancelled session commits nothing further. Lock order is store, then session. A single native worker owns all sync attempts. It coalesces edits within 750ms, polls every 30 seconds and retries failures with 5s–300s exponential backoff. Edits during an outage preserve the retry deadline; connect/manual/online/foreground signals request an immediate attempt. On Linux, credentials remembered in the Secret Service reconnect at startup (`src-tauri/src/credentials.rs`); otherwise sync is session-only. Sync status is held in Rust and emitted to the UI. There is no E2E encryption, signup, push delivery or server-scheduled alarm logic.
 
 ## Suggested development loop
 
 Use `npm run tauri dev` on Linux for the fastest full app loop. Change UI styles in `src/styles.css`; Vite reloads them. Change domain behavior in `crates/core` and run its tests first. Before sharing a change, run the checks in the README and test the native flow that changed. Add regression tests for data loss, migrations, conflicts and scheduling rules.
 
-Use a local backend account during development. Test with two app profiles/devices before changing sync behavior. Do not share local data between multiple running processes; a stale writer reports an error and needs a restart. CI checks the Linux build; Android needs its own device build once the SDK is configured.
+Use a local backend account during development. Test with two app profiles/devices before changing sync behavior. Do not share local data between multiple running processes; a stale writer reports an error and needs a restart. CI checks the Linux build; Android builds locally with `npm run package:android` and still needs a CI job.
 
 ## Roadmap
 
@@ -35,8 +37,19 @@ The lock fix is an early correctness task: it depends on migration support for p
 
 ### 0a. App identity, distribution and Android feasibility
 
-- **Finalize the identifier before `tauri android init`.** The starter uses `dev.astraea.nothingtodo`; the final identifier has not been selected. It determines the Linux data directory and Android package identity. Changing it does not delete old data, but can leave it outside the new app's data directory and install a separate Android app. Define migration for any existing profiles.
-- **Choose initial distribution targets.** Decide whether Android initially ships through Play, F-Droid or sideloading, and choose the first Linux format from Flatpak, AppImage or deb/rpm. Validate dependency/license compatibility and channel policies before committing to packaging. Distribution affects exact-alarm policy, credential access, notifications, tray integration and autostart; sideloading does not remove Android's OS permission or power-management restrictions. Keep later channels optional.
+**Decisions (2026-10-27):**
+
+- Identifier: `uk.co.astraeaoss.nothingtodo` (Android package, GTK app ID, keyring service). No released profiles exist under the starter identifier, so no data migration is needed.
+- License: GPL-3.0-or-later.
+- Android: sideloaded signed APK first (GitHub releases / Obtainium). Play and F-Droid are optional later channels.
+- Linux: portable-first, following the owner's other Tauri apps (Forever Music). Tauri bundling stays off; a packaging script produces a tarball with the binary, a `.desktop` entry, hicolor icons, a safe-mode launcher setting `WEBKIT_DISABLE_DMABUF_RENDERER=1` and the README. Arch/CachyOS with Hyprland is the first-class target; an AppImage archive built on an older-glibc host is optional later.
+- Linux data lives in a writable `NothingToDo Data` folder beside the executable, not in `~/.local/share`. Credentials stay in the system keyring, never in that folder. Android keeps its private app storage.
+- Optional `install.sh` in the portable folder registers it in place (launcher entry, icons) and, with `--autostart`, a systemd user service on `graphical-session.target` that starts `nothingtodo --hidden`. Closing the window hides it to the tray so reminders keep firing; a second launch shows the running instance. Implemented, with `npm run package:linux`.
+- Snooze is device-local and never synced (decided 2026-10-28). Per-entry snooze and sound settings are deferred. Implemented 2026-10-28 for the in-app button: each record keeps a local `snooze` (`of`, the reminder time it applies to, and `until`), which sync never uploads and which lapses when the synced reminder time or completion changes. Only a reminder that has gone off can be snoozed, and a snooze never moves a reminder earlier.
+- Proposed defaults for later milestones, pending objection: defer encryption at rest (state plainly that data is plaintext); every device notifies; no notifications for reminders already due before a device's first sync (show them as overdue).
+
+- ~~Finalize the identifier~~ and ~~choose initial distribution targets~~: done, see the decisions above. Sideloading does not remove Android's OS permission or power-management restrictions. Validate dependency licences against GPL-3.0-or-later before the first release.
+- Current state (2026-10-28): the Android project is generated and committed under `src-tauri/gen/android`; `npm run package:android` builds an optimized arm64 APK. On an API 36 x86_64 emulator the debug and R8-minified release builds launch, persist tasks across restarts and upgrades, sync against a local Worker, reconnect from the Keystore after restart, request notification permission and show an in-process reminder. The activity pads the WebView for system bars, cutouts and the keyboard (edge-to-edge). On a real phone (Android 16) the release APK syncs with production over HTTPS; this needed `rustls-platform-verifier` initialised from `setup` and its Kotlin component in the Gradle build, without which the first HTTPS request panicked and, with `panic = "abort"`, closed the app on every launch once credentials were remembered. Still needed: process-death and timezone checks, Android CI and the performance baseline.
 - **Prove the Android build on a real phone.** Configure JDK/SDK/NDK, generate the project and verify launch, SQLite persistence, HTTPS sync and notification permissions. Check the pinned `reqwest`/Rustls/AWS-LC and bundled SQLite dependencies with the NDK. Change crypto providers only in response to demonstrated issues: [AWS-LC documents Android support](https://aws.github.io/aws-lc-rs/platform_support.html). Add Android compile CI after the project builds; real-device lifecycle tests remain separate.
 - **Measure existing behavior early.** Record first-sync duration and page count, database/snapshot size, lock wait time and edit/reminder responsiveness with representative small and large histories, including weak connectivity. Set performance budgets from those measurements. Recheck them after the lock fix and before deciding on normalization.
 
@@ -46,9 +59,9 @@ Acceptance: record the identifier and initial channels, document their credentia
 
 Implement numbered migrations first, forward-compatible record handling next, then export/import against that representation. Version the export format from its first release. Before the first migration, retain the existing closed-app directory backup procedure so the original database remains recoverable.
 
-**Numbered migrations:** track the database version (for example with `PRAGMA user_version`), migrate unversioned snapshots transactionally and refuse newer unsupported database versions without modifying them. Add persisted per-record local revisions before implementing the lock fix. Preserve pending changes, tombstones, conflicts and delivery state, and test failures/interruption without acknowledging uncommitted data.
+**Numbered migrations (implemented as database version 1):** track the database version (for example with `PRAGMA user_version`), migrate unversioned snapshots transactionally and refuse newer unsupported database versions without modifying them. Add persisted per-record local revisions before implementing the lock fix. Preserve pending changes, tombstones, conflicts and delivery state, and test failures/interruption without acknowledging uncommitted data.
 
-**Downgrade protection for today’s binary:** `user_version` alone is insufficient because the current binary never checks it. In the first format migration, move the authoritative snapshot into a new versioned table, retain the legacy `app_state` table with an explicit upgrade-required JSON sentinel that the old `Snapshot` decoder cannot read, and add database triggers rejecting legacy inserts, updates and deletes. Migrate and install these guards atomically; do not leave a readable legacy snapshot that can be saved without new metadata. This is a guarded snapshot relocation, not a requirement to normalize all records now. Require old app instances to be stopped before migration; local database guards cannot revoke network requests from an already-running old process.
+**Downgrade protection for the pre-migration binary (implemented in version 1):** `user_version` alone is insufficient because the current binary never checks it. In the first format migration, move the authoritative snapshot into a new versioned table, retain the legacy `app_state` table with an explicit upgrade-required JSON sentinel that the old `Snapshot` decoder cannot read, and add database triggers rejecting legacy inserts, updates and deletes. Migrate and install these guards atomically; do not leave a readable legacy snapshot that can be saved without new metadata. This is a guarded snapshot relocation, not a requirement to normalize all records now. Require old app instances to be stopped before migration; local database guards cannot revoke network requests from an already-running old process.
 
 Test the actual previous binary against a migrated database: opening must fail clearly, legacy writes (including from a connection opened before migration) must fail, and the new snapshot, revisions and cursor must remain unchanged. Also test rollback after an interrupted migration and that restoring an older backup does not bypass migration/guards on its next supported-client open. Keep an untouched pre-migration backup rather than advertising an in-place downgrade.
 
@@ -69,6 +82,9 @@ Acceptance: test migration failure and previous-binary downgrade/write rejection
 
 ### 1. Responsive sync and worker correctness
 
+Current state: the lock release, revision-checked acknowledgements, bounded replay passes and session cancellation are implemented with core and backend contract tests. Not yet done: native worker/frontend tests and a measured comparison with the 0a baseline.
+
+
 Start after the migration/local-revision prerequisite in 0b; do not wait for protected credentials or account marker design. Never hold the store mutex across HTTP calls or the sync-client mutex for an entire attempt. Capture request state, release locks, perform I/O, then commit with revision checks so acknowledgements cannot overwrite concurrent edits. Keep each applied page and its cursor atomic and keep network attempts serialized. Credential replacement must isolate or invalidate responses from the previous session.
 
 Keep manual requests and connection changes responsive, coalesce wake signals, and expose cancellation/progress for long initial downloads. Bound replay work per pass so large histories cannot starve edits or reminder checks. This fix does not depend on normalized SQLite.
@@ -76,6 +92,9 @@ Keep manual requests and connection changes responsive, coalesce wake signals, a
 Acceptance: deterministic tests cover edits during slow writes, lost acknowledgements, session replacement, offline retries, wake storms and multi-page replay. Test the native worker and frontend busy/status behavior as well as core policy. Compare responsiveness with the 0a baseline; queued network work must not hold local editing or reminder checks behind a request timeout.
 
 ### 2. Protected credentials, account migration and encryption decision
+
+Current state: the Linux Secret Service adapter with a session-only fallback is implemented and checked against GNOME Keyring. Android uses `android-native-keyring-store` (SharedPreferences encrypted with a Keystore AES key), checked on an API 36 emulator across restarts and an upgrade install. Key invalidation handling, the Flatpak portal, account identity/migration and the encryption decision remain open.
+
 
 Select credential adapters for the initial packaging targets from 0a. Use Linux Secret Service where available, with an explicit session-only fallback on setups without a usable keyring; never persist plaintext tokens. For Flatpak, evaluate the [Secret portal](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Secret.html): it supplies an app-specific secret for encrypting sandbox data, not a transparent Secret Service API. On Android, encrypt tokens with a Keystore-backed key and store ciphertext privately. Handle unavailable/locked stores, key invalidation, revocation and disconnect without logging secrets.
 
@@ -106,7 +125,7 @@ Decide and document the product rules before implementing adapters:
 - Whether every device notifies or a preferred device is selected.
 - A missed-reminder cutoff or summary, particularly on first sync, so historical tasks cannot cause a notification storm.
 - One-shot timezone meaning: retain the current fixed-instant behavior for the first release, displaying it in the device's current timezone. Traveling changes the displayed local time, not the stored instant. Floating local-time reminders require an explicit future model.
-- Device-local snooze is the proposed default. Store it separately from synced `remindAt` and future recurrence, with explicit restore/reset behavior. This also avoids a server write, retained history event and conflict opportunity per snooze. Do not claim it is implemented yet.
+- Snooze is device-local (decided and implemented for the in-app button, see 0a). It is stored separately from synced `remindAt`, which also avoids a server write, retained history event and conflict opportunity per snooze. Still to do: the notification's Snooze action, restore/reset behavior for backups, and how it applies to recurring occurrences.
 - Complete and Snooze actions on notifications. Prove cold-process handling, durable local mutation, rescheduling/cancellation and queued sync without relying on an open webview. Complete is shared task state; local Snooze stays device-local. Make repeated or outdated action delivery safe.
 - Linux close-window behavior, tray/background operation, optional autostart and single-instance activation. Validate these in the selected package format and desktop environment while retaining database compare-and-swap protection.
 
@@ -122,7 +141,7 @@ Acceptance: demonstrate foreground/background overlap, concurrent edits, credent
 
 ### First release boundary
 
-Ship after the relevant checkpoints above demonstrate safe persistence/recovery, compatible sync and rollout rules, responsive editing, protected credentials (with an explicit session-only fallback), and device-tested one-shot reminders with Complete/Snooze actions. Document missed reminders, fixed-instant timezone behavior, encryption status and stale cross-device alarms. Finish initial-channel packaging, branding/icons, template metadata such as `authors = ["you"]`, signing and release validation here; styling need not wait for the later work below.
+Ship after the relevant checkpoints above demonstrate safe persistence/recovery, compatible sync and rollout rules, responsive editing, protected credentials (with an explicit session-only fallback), and device-tested one-shot reminders with Complete/Snooze actions. Document missed reminders, fixed-instant timezone behavior, encryption status and stale cross-device alarms. Finish initial-channel packaging, branding/icons, a release signing key, and release validation here; styling need not wait for the later work below.
 
 Acceptance: run migration/recovery, sync concurrency and real-device lifecycle checks on supported versions and the selected Linux/Android channels. Publish the minimum supported client version and exact background-sync guarantees. Native background sync is included only if 3b passes; otherwise clearly state that cross-device changes are learned while active. Recurrence, standalone alarms, field-level merging and normalization are not release gates unless measurements or safety requirements make a specific storage change necessary.
 
@@ -160,9 +179,9 @@ Fields:
   - one repeat rule;
   - any number of warnings before the entry;
   - `notes`, which replaces the separate description and notes ideas. Its first line serves as the summary.
-- **Sound:** follows the kind. A per-entry override can come later.
+- **Sound and snooze:** follow the kind. Per-entry sound and snooze settings are deferred; snooze uses a fixed length and stays device-local (0a).
 
-Repeat presets are 8 hours, daily, weekly, 28 days, 1, 3, 4, 6 and 12 months, and custom. Daily and weekly repeats take an optional set of weekdays, so an alarm can run Monday to Friday; "weekdays", "weekends" and "every day" are shortcuts for that set. Warnings are offsets such as 5 minutes, 1 day or 1 week. Markers can also use "morning of", a local time defaulting to 09:00.
+Repeat presets are 8 hours, daily, weekly, 28 days, 1, 3, 4, 6 and 12 months, and custom. Daily and weekly repeats take an optional set of weekdays, so an alarm can run Monday to Friday; "weekdays", "weekends" and "every day" are shortcuts for that set. Warnings are offsets such as 5 minutes, 1 day or 1 week. Markers can also have a "Day of" warning at a local time, 09:00 by default.
 
 **Engineering requirements:**
 
@@ -184,12 +203,13 @@ Repeat presets are 8 hours, daily, weekly, 28 days, 1, 3, 4, 6 and 12 months, an
   - Android limits how many alarms an app can have pending. Keep the horizon and alarm count well under that limit.
   - Apply the missed-reminder policy per occurrence, so an app closed for a day doesn't fire a backlog of 8-hourly doses.
 - **Alarm delivery.** Ringing until stopped is a separate native path from the notification plugin's one-shot schedule.
-  - **Android:** use an alarm-clock alarm (`AlarmManager.setAlarmClock`) and a full-screen alert that loops audio on the alarm stream until stopped or snoozed.
+  - **Android:** use an alarm-clock alarm (`AlarmManager.setAlarmClock`) and a full-screen alert that loops audio on the alarm stream until stopped or snoozed. The ringing must run in a foreground service started from the alarm, so it keeps going after the app's process has been closed.
+  - **Alarm permissions:** `setAlarmClock` needs exact-alarm access. `USE_EXACT_ALARM` is meant for alarm apps and is granted at install; `SCHEDULE_EXACT_ALARM` can be revoked by the user. Declare the foreground service type the target Android version requires.
   - **Android 14+ permission:** full-screen intents are a special permission there. Check `NotificationManager.canUseFullScreenIntent()` and fall back to a heads-up notification when it is denied.
   - **Exact alarms:** the exact-alarm permission rules from 3a still apply.
-  - **Linux:** the tray process plays the sound until stopped. Nothing rings when the app isn't running, and the UI must say so.
-- **Markers.** Markers schedule nothing for the day itself. Their warnings are ordinary silent or one-sound notifications at the chosen local time.
-- **Cross-device behaviour.** Snooze stays device-local. Stopping an alarm on one device doesn't stop another device that is already ringing; document this together with the stale-alarm limits in 3b.
+  - **Linux:** the tray process plays the sound until stopped, which needs an audio playback dependency (through PipeWire or PulseAudio). Nothing rings when the app isn't running, and the UI must say so.
+- **Markers.** Markers schedule nothing by default. Their warnings, including the optional "Day of" warning, are ordinary silent or one-sound notifications at a local time.
+- **Cross-device behaviour.** Snooze stays device-local and is never synced. Stopping an alarm on one device doesn't stop another device that is already ringing; document this together with the stale-alarm limits in 3b.
 
 Acceptance:
 
@@ -203,7 +223,8 @@ Planned, not implemented. Agreed on 2026-10-28 from `docs/design/ui-directions.h
 
 **Visual language.** Follows Nothing's style: black and white, a dot-matrix font for numerals and headings, dot textures and dot instruments instead of icons.
 
-- Red is reserved for now, overdue, conflicts and a ringing alarm. It appears once as the signature dot on the Add button.
+- Red is reserved for now, overdue, conflicts and a ringing alarm. It appears once as the signature dot on the Add button. Today's UI also uses red for Delete and error states; move those to other treatments when this styling lands.
+- **Fonts:** Doto (dot-matrix), Space Grotesk and Space Mono, all under the SIL Open Font License. The deck loads them from Google Fonts, but the app must bundle them with the frontend, with their licence files: it works offline, and its content security policy blocks remote fonts.
 - Entry types are shapes (tab 02 · A): alarm a filled double ring, reminder a hollow ring, marker a square.
 - No free-time visualisation anywhere.
 
@@ -216,12 +237,12 @@ Planned, not implemented. Agreed on 2026-10-28 from `docs/design/ui-directions.h
 **Adding (tab 03: B structure, B1 tiles, B2 instruments).**
 
 - **Short sheet:** title, round type keys (alarm, reminder, marker), the time in a dot readout, day chips (Today, tomorrow, the next day, Pick), a dot grip and Add. Most entries finish here: a title and a time.
-- **Pulled up:** every other field as a widget tile with big dot numerals. When, Duration, Repeat, Warn before, Sound, Snooze, Type and Notes. The title is the heading. Pull down to return to the short sheet.
+- **Pulled up:** every other field as a widget tile with big dot numerals. When, Duration, Repeat, Warn before, Type and Notes. Sound and Snooze tiles are deferred with their settings (5a). The title is the heading. Pull down to return to the short sheet.
 - **Tile edit:** tapping a tile opens it in place at full width with its presets while the others dim. There is no separate picker screen.
-- **Instruments (from B2):** drawn inside tiles where they help: a 24-hour dot dial for When, a dot bar for Duration, a dot timeline for Warn before, a dot ring for Repeat showing one cycle with occurrences lit, and a dot waveform for Sound.
+- **Instruments (from B2):** drawn inside tiles where they help: a 24-hour dot dial for When, a dot bar for Duration, a dot timeline for Warn before and a dot ring for Repeat showing one cycle with occurrences lit. The dot waveform waits for the Sound tile.
 - **Repeat tile:** presets 8 h, Daily, Weekly, 28 d, 1, 3, 4, 6 and 12 months, and Custom. Daily and Weekly show day keys (M–S) with Weekdays, Weekends and All shortcuts, so an alarm can run Monday to Friday. The tile shows the next occurrences.
 - **Warn before tile:** pick any number of warnings (5 min to 1 month, plus "Day of" for markers), shown on a timeline before the start.
-- **Tiles follow the type:** markers have no Sound or Snooze tile; alarms ring until stopped.
+- **Tiles follow the type:** markers have no time-of-day tiles beyond the optional "Day of" warning; alarms ring until stopped.
 - **Typing stays a shortcut:** typed tokens such as `fri 8am`, `for 45m`, `weekdays 7am` and `warn 1w` fill the same tiles. Templates (recipes) are set aside and may return as saved presets.
 - **Notes** replaces the separate description and notes fields. Its first line shows as a summary under the title.
 - **Priority** describes how the three types differ. It is not a field.
