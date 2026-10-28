@@ -17,47 +17,79 @@ import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
+import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 
 /**
  * Hands reminders to Android so they fire with the app closed. Rust sends the full list of
  * upcoming reminders after every change; it is saved to a file so the reboot receiver can re-arm
  * alarms without starting the app's Rust side or webview.
+ *
+ * Notification buttons never touch the database. They act on the notification and alarm at once
+ * and append to an action log, which the Rust side applies to the store, then acknowledges, the
+ * next time it runs. Applying an action twice is harmless.
  */
 object Reminders {
-  private const val FILE = "scheduled-reminders.json"
+  private const val SCHEDULE_FILE = "scheduled-reminders.json"
+  private const val ACTIONS_FILE = "reminder-actions.json"
   private const val CHANNEL = "reminders"
-  private const val EXTRA_ID = "id"
-  private const val EXTRA_TITLE = "title"
-  private const val EXTRA_AT = "at"
+  private const val SNOOZE_MILLIS = 10 * 60 * 1000L
+  private const val ACTION_COMPLETE = "uk.co.astraeaoss.nothingtodo.COMPLETE"
+  private const val ACTION_SNOOZE = "uk.co.astraeaoss.nothingtodo.SNOOZE"
 
-  data class Reminder(val id: Int, val at: Long, val title: String)
+  /** `remindAt` is the synced reminder time; `at` can be later after a snooze. */
+  data class Reminder(val id: Int, val at: Long, val title: String, val taskId: String, val remindAt: Long) {
+    fun toJson(): JSONObject = JSONObject()
+      .put("id", id).put("at", at).put("title", title).put("taskId", taskId).put("remindAt", remindAt)
+
+    companion object {
+      fun fromJson(json: JSONObject) = Reminder(
+        json.getInt("id"), json.getLong("at"), json.getString("title"),
+        json.getString("taskId"), json.getLong("remindAt")
+      )
+
+      fun fromIntent(intent: Intent): Reminder? {
+        val title = intent.getStringExtra("title") ?: return null
+        val taskId = intent.getStringExtra("taskId") ?: return null
+        return Reminder(
+          intent.getIntExtra("id", 0), intent.getLongExtra("at", 0), title, taskId,
+          intent.getLongExtra("remindAt", 0)
+        )
+      }
+    }
+
+    fun putInto(intent: Intent): Intent = intent
+      .putExtra("id", id).putExtra("at", at).putExtra("title", title)
+      .putExtra("taskId", taskId).putExtra("remindAt", remindAt)
+  }
 
   @Synchronized
   fun replace(context: Context, reminders: List<Reminder>) {
-    val keep = reminders.map { it.id }.toSet()
-    load(context).filter { it.id !in keep }.forEach { cancel(context, it.id) }
+    // A snooze pressed since Rust last read the action log is not in its list yet; keep it.
+    val listed = reminders.map { it.id }.toSet()
+    val snoozed = pendingSnoozes(context).filter { it.id !in listed }
+    val all = reminders + snoozed
+    val keep = all.map { it.id }.toSet()
+    loadSchedule(context).filter { it.id !in keep }.forEach { cancel(context, it.id) }
     // Save before arming, so a reboot part-way through still restores everything.
-    save(context, reminders)
-    reminders.forEach { arm(context, it) }
+    saveSchedule(context, all)
+    all.forEach { arm(context, it) }
   }
 
   /** After a reboot or app update, which clear alarms. Reminders already past are skipped. */
   @Synchronized
   fun rearm(context: Context) {
-    load(context).forEach { arm(context, it) }
+    loadSchedule(context).forEach { arm(context, it) }
   }
 
   private fun arm(context: Context, reminder: Reminder) {
     if (reminder.at <= System.currentTimeMillis()) return
     val alarms = context.getSystemService(AlarmManager::class.java)
-    val intent = Intent(context, ReminderReceiver::class.java)
-      .putExtra(EXTRA_ID, reminder.id)
-      .putExtra(EXTRA_TITLE, reminder.title)
-      .putExtra(EXTRA_AT, reminder.at)
+    val intent = reminder.putInto(Intent(context, ReminderReceiver::class.java))
     val pending = PendingIntent.getBroadcast(
       context, reminder.id, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
@@ -80,8 +112,7 @@ object Reminders {
   }
 
   fun show(context: Context, intent: Intent) {
-    val id = intent.getIntExtra(EXTRA_ID, 0)
-    val title = intent.getStringExtra(EXTRA_TITLE) ?: return
+    val reminder = Reminder.fromIntent(intent) ?: return
     val notifications = context.getSystemService(NotificationManager::class.java)
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       notifications.createNotificationChannel(
@@ -90,61 +121,132 @@ object Reminders {
     }
     val open = PendingIntent.getActivity(
       context,
-      id,
+      reminder.id,
       Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
     val notification = NotificationCompat.Builder(context, CHANNEL)
       .setSmallIcon(android.R.drawable.ic_popup_reminder)
       .setContentTitle("NothingToDo reminder")
-      .setContentText(title)
-      .setWhen(intent.getLongExtra(EXTRA_AT, System.currentTimeMillis()))
+      .setContentText(reminder.title)
+      .setWhen(reminder.at)
       .setShowWhen(true)
       .setCategory(NotificationCompat.CATEGORY_REMINDER)
       .setPriority(NotificationCompat.PRIORITY_HIGH)
       .setContentIntent(open)
       .setAutoCancel(true)
+      .addAction(0, "Complete", button(context, reminder, ACTION_COMPLETE))
+      .addAction(0, "Snooze 10 min", button(context, reminder, ACTION_SNOOZE))
       .build()
     try {
-      NotificationManagerCompat.from(context).notify(id, notification)
+      NotificationManagerCompat.from(context).notify(reminder.id, notification)
     } catch (_: SecurityException) {
       // Notification permission was denied or revoked; the task still shows as overdue.
     }
   }
 
-  private fun file(context: Context) = File(context.filesDir, FILE)
+  private fun button(context: Context, reminder: Reminder, action: String): PendingIntent {
+    // The action string keeps the two buttons' intents distinct for the same notification ID.
+    val intent = reminder.putInto(Intent(context, ReminderActionReceiver::class.java).setAction(action))
+    return PendingIntent.getBroadcast(
+      context, reminder.id, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+  }
 
-  private fun save(context: Context, reminders: List<Reminder>) {
-    val json = JSONArray()
-    reminders.forEach {
-      json.put(JSONObject().put("id", it.id).put("at", it.at).put("title", it.title))
+  @Synchronized
+  fun press(context: Context, intent: Intent) {
+    val reminder = Reminder.fromIntent(intent) ?: return
+    NotificationManagerCompat.from(context).cancel(reminder.id)
+    val entry = JSONObject()
+      .put("key", UUID.randomUUID().toString())
+      .put("id", reminder.id)
+      .put("title", reminder.title)
+      .put("taskId", reminder.taskId)
+      .put("remindAt", reminder.remindAt)
+    val schedule = loadSchedule(context).filter { it.id != reminder.id }
+    when (intent.action) {
+      ACTION_COMPLETE -> {
+        entry.put("action", "complete")
+        cancel(context, reminder.id)
+        saveSchedule(context, schedule)
+      }
+      ACTION_SNOOZE -> {
+        val until = System.currentTimeMillis() + SNOOZE_MILLIS
+        entry.put("action", "snooze").put("until", until)
+        val snoozed = reminder.copy(at = until)
+        saveSchedule(context, schedule + snoozed)
+        arm(context, snoozed)
+      }
+      else -> return
     }
-    val target = file(context)
+    val actions = loadActions(context)
+    actions.put(entry)
+    write(context, ACTIONS_FILE, actions.toString())
+  }
+
+  /** Every action not yet acknowledged by the Rust side. */
+  @Synchronized
+  fun actions(context: Context): JSONArray = loadActions(context)
+
+  @Synchronized
+  fun acknowledge(context: Context, keys: Set<String>) {
+    val remaining = JSONArray()
+    val actions = loadActions(context)
+    for (i in 0 until actions.length()) {
+      val action = actions.getJSONObject(i)
+      if (action.getString("key") !in keys) remaining.put(action)
+    }
+    write(context, ACTIONS_FILE, remaining.toString())
+  }
+
+  private fun pendingSnoozes(context: Context): List<Reminder> {
+    val actions = loadActions(context)
+    return (0 until actions.length()).map { actions.getJSONObject(it) }
+      .filter { it.optString("action") == "snooze" }
+      .map {
+        Reminder(it.getInt("id"), it.getLong("until"), it.getString("title"), it.getString("taskId"), it.getLong("remindAt"))
+      }
+  }
+
+  private fun write(context: Context, name: String, text: String) {
+    val target = File(context.filesDir, name)
     val temporary = File(target.path + ".new")
-    temporary.writeText(json.toString())
+    temporary.writeText(text)
     temporary.renameTo(target)
   }
 
-  private fun load(context: Context): List<Reminder> {
-    val text = try {
-      file(context).readText()
-    } catch (_: Exception) {
-      return emptyList()
-    }
-    return try {
-      val json = JSONArray(text)
-      (0 until json.length()).map {
-        val item = json.getJSONObject(it)
-        Reminder(item.getInt("id"), item.getLong("at"), item.getString("title"))
-      }
-    } catch (_: Exception) {
-      emptyList()
-    }
+  private fun read(context: Context, name: String): String? = try {
+    File(context.filesDir, name).readText()
+  } catch (_: Exception) {
+    null
+  }
+
+  private fun saveSchedule(context: Context, reminders: List<Reminder>) {
+    val json = JSONArray()
+    reminders.forEach { json.put(it.toJson()) }
+    write(context, SCHEDULE_FILE, json.toString())
+  }
+
+  private fun loadSchedule(context: Context): List<Reminder> = try {
+    val json = JSONArray(read(context, SCHEDULE_FILE) ?: "[]")
+    (0 until json.length()).map { Reminder.fromJson(json.getJSONObject(it)) }
+  } catch (_: Exception) {
+    emptyList()
+  }
+
+  private fun loadActions(context: Context): JSONArray = try {
+    JSONArray(read(context, ACTIONS_FILE) ?: "[]")
+  } catch (_: Exception) {
+    JSONArray()
   }
 }
 
 class ReminderReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) = Reminders.show(context, intent)
+}
+
+class ReminderActionReceiver : BroadcastReceiver() {
+  override fun onReceive(context: Context, intent: Intent) = Reminders.press(context, intent)
 }
 
 /** Alarms are cleared by a reboot, an app update and a change to exact-alarm access. */
@@ -157,6 +259,8 @@ class ScheduledReminder {
   var id: Int = 0
   var at: Long = 0
   var title: String = ""
+  var taskId: String = ""
+  var remindAt: Long = 0
 }
 
 @InvokeArg
@@ -164,12 +268,32 @@ class ScheduleArgs {
   var reminders: List<ScheduledReminder> = emptyList()
 }
 
+@InvokeArg
+class AcknowledgeArgs {
+  var keys: List<String> = emptyList()
+}
+
 @TauriPlugin
 class ReminderPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun schedule(invoke: Invoke) {
     val args = invoke.parseArgs(ScheduleArgs::class.java)
-    Reminders.replace(activity.applicationContext, args.reminders.map { Reminders.Reminder(it.id, it.at, it.title) })
+    Reminders.replace(
+      activity.applicationContext,
+      args.reminders.map { Reminders.Reminder(it.id, it.at, it.title, it.taskId, it.remindAt) }
+    )
+    invoke.resolve()
+  }
+
+  @Command
+  fun actions(invoke: Invoke) {
+    invoke.resolve(JSObject().put("actions", Reminders.actions(activity.applicationContext)))
+  }
+
+  @Command
+  fun acknowledgeActions(invoke: Invoke) {
+    val args = invoke.parseArgs(AcknowledgeArgs::class.java)
+    Reminders.acknowledge(activity.applicationContext, args.keys.toSet())
     invoke.resolve()
   }
 

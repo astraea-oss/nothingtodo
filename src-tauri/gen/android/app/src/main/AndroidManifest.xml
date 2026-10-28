@@ -32,6 +32,7 @@
 
         <!-- Reminders scheduled with Android; see Reminders.kt. -->
         <receiver android:name=".ReminderReceiver" android:exported="false" />
+        <receiver android:name=".ReminderActionReceiver" android:exported="false" />
         <receiver android:name=".ReminderRestoreReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

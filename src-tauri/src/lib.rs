@@ -181,6 +181,12 @@ async fn sync_now(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|_| "Sync worker stopped.".to_string())
 }
 
+/// The page became visible: apply notification buttons pressed meanwhile and refresh alarms.
+#[tauri::command]
+fn refresh_reminders(app: AppHandle) {
+    reminders::request(&app);
+}
+
 #[tauri::command]
 fn open_notification_settings(app: AppHandle) -> Result<(), String> {
     reminders::open_notification_settings(&app)
@@ -247,7 +253,8 @@ pub fn run() {
             disconnect_sync,
             sync_now,
             sync_status,
-            open_notification_settings
+            open_notification_settings,
+            refresh_reminders
         ])
         .run(tauri::generate_context!())
         .expect("error while running NothingToDo");

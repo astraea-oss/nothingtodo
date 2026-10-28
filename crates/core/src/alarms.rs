@@ -15,7 +15,22 @@ pub struct Alarm {
     pub task_id: String,
     /// Milliseconds since the Unix epoch; the reminder time or a later local snooze.
     pub at: i64,
+    /// The synced reminder time, which notification actions quote back so outdated ones can be
+    /// recognised.
+    pub remind_at: i64,
     pub title: String,
+}
+
+/// A button pressed on a reminder notification, recorded by the OS side while the app may not
+/// be running and applied when it next is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "action")]
+pub enum NotificationAction {
+    Complete,
+    /// `until` is fixed when the button is pressed, so applying it twice changes nothing.
+    Snooze {
+        until: i64,
+    },
 }
 
 /// Device-local mapping from task UUIDs to the 32-bit IDs notification APIs need. IDs are handed
@@ -48,21 +63,21 @@ impl Store {
     /// show as overdue instead, so a first sync or a long absence cannot cause a burst of
     /// notifications. Assigns notification IDs as needed and drops those of finished tasks.
     pub fn alarms(&mut self, now: i64) -> Result<Vec<Alarm>> {
-        let mut upcoming: Vec<(i64, &String, &str)> = self
+        let mut upcoming: Vec<(i64, &String, i64, &str)> = self
             .state
             .records
             .iter()
             .filter_map(|(id, record)| {
                 let task = record.task.as_ref().filter(|task| !task.completed)?;
                 let at = record.reminder_at().filter(|&at| at > now)?;
-                Some((at, id, task.title.as_str()))
+                Some((at, id, task.remind_at?, task.title.as_str()))
             })
             .collect();
         upcoming.sort();
         upcoming.truncate(MAX_SCHEDULED);
-        let upcoming: Vec<(i64, String, String)> = upcoming
+        let upcoming: Vec<(i64, String, i64, String)> = upcoming
             .into_iter()
-            .map(|(at, id, title)| (at, id.clone(), title.into()))
+            .map(|(at, id, remind_at, title)| (at, id.clone(), remind_at, title.into()))
             .collect();
 
         let mut ids = self.state.notification_ids.clone();
@@ -74,10 +89,11 @@ impl Store {
         });
         let alarms = upcoming
             .into_iter()
-            .map(|(at, task_id, title)| Alarm {
+            .map(|(at, task_id, remind_at, title)| Alarm {
                 notification_id: ids.assign(&task_id),
                 task_id,
                 at,
+                remind_at,
                 title,
             })
             .collect();
@@ -87,6 +103,44 @@ impl Store {
             self.commit(state)?;
         }
         Ok(alarms)
+    }
+
+    /// Applies a notification button press for the reminder that was due at `remind_at`. Returns
+    /// whether the task changed in a way that needs syncing. Repeated or outdated presses change
+    /// nothing: a deleted task stays deleted, and a snooze is dropped if the reminder has moved
+    /// since, or if its time has already passed (the OS has shown it by then).
+    pub fn apply_notification_action(
+        &mut self,
+        task_id: &str,
+        remind_at: i64,
+        action: &NotificationAction,
+        now: i64,
+    ) -> Result<bool> {
+        let Some(record) = self.state.records.get(task_id) else {
+            return Ok(false);
+        };
+        let Some(task) = record.task.as_ref().filter(|task| !task.completed) else {
+            return Ok(false);
+        };
+        match *action {
+            NotificationAction::Complete => {
+                let mut done = task.clone();
+                done.completed = true;
+                self.save_task(Some(task_id.into()), done)?;
+                Ok(true)
+            }
+            NotificationAction::Snooze { until } => {
+                if task.remind_at == Some(remind_at) && until > now && until > remind_at {
+                    let mut state = self.snapshot();
+                    state.records.get_mut(task_id).unwrap().snooze = Some(crate::Snooze {
+                        of: remind_at,
+                        until,
+                    });
+                    self.commit(state)?;
+                }
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -146,6 +200,73 @@ mod tests {
         let id = store.save_task(None, task("Call", Some(1000))).unwrap();
         store.snooze(&id, 1000, 5000).unwrap();
         assert_eq!(store.alarms(2000).unwrap()[0].at, 5000);
+    }
+
+    #[test]
+    fn notification_actions_are_idempotent_and_ignore_outdated_snoozes() {
+        let mut store = Store::open(":memory:").unwrap();
+        let id = store.save_task(None, task("Call", Some(1000))).unwrap();
+        let snooze = NotificationAction::Snooze { until: 1600 };
+        // Pressed while the reminder was at 1000, applied later.
+        assert!(
+            !store
+                .apply_notification_action(&id, 1000, &snooze, 1100)
+                .unwrap()
+        );
+        assert_eq!(store.snapshot().records[&id].reminder_at(), Some(1600));
+        let revision = store.snapshot().records[&id].local_revision;
+        store
+            .apply_notification_action(&id, 1000, &snooze, 1100)
+            .unwrap();
+        assert_eq!(store.snapshot().records[&id].local_revision, revision);
+        // Moved on another device: an old snooze no longer applies.
+        store
+            .save_task(Some(id.clone()), task("Call", Some(5000)))
+            .unwrap();
+        store
+            .apply_notification_action(&id, 1000, &NotificationAction::Snooze { until: 1700 }, 1100)
+            .unwrap();
+        assert_eq!(store.snapshot().records[&id].reminder_at(), Some(5000));
+        // Applied after the snooze time: nothing left to delay.
+        store
+            .apply_notification_action(&id, 5000, &NotificationAction::Snooze { until: 5600 }, 6000)
+            .unwrap();
+        assert_eq!(store.snapshot().records[&id].snooze, None);
+
+        assert!(
+            store
+                .apply_notification_action(&id, 5000, &NotificationAction::Complete, 6000)
+                .unwrap()
+        );
+        let record = &store.snapshot().records[&id];
+        assert!(record.task.as_ref().unwrap().completed && record.dirty);
+        // A second delivery of the same press changes nothing.
+        assert!(
+            !store
+                .apply_notification_action(&id, 5000, &NotificationAction::Complete, 6000)
+                .unwrap()
+        );
+        store.delete_task(&id).unwrap();
+        assert!(
+            !store
+                .apply_notification_action(&id, 5000, &NotificationAction::Complete, 6000)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .apply_notification_action("missing", 1, &NotificationAction::Complete, 6000)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn notification_actions_use_the_journal_format() {
+        let complete: NotificationAction =
+            serde_json::from_str(r#"{"action":"complete"}"#).unwrap();
+        assert_eq!(complete, NotificationAction::Complete);
+        let snooze: NotificationAction =
+            serde_json::from_str(r#"{"action":"snooze","until":5}"#).unwrap();
+        assert_eq!(snooze, NotificationAction::Snooze { until: 5 });
     }
 
     #[test]

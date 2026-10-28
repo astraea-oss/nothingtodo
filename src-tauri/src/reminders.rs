@@ -38,7 +38,8 @@ pub fn open_notification_settings(_: &AppHandle) -> Result<(), String> {
 
 #[cfg(target_os = "android")]
 mod android {
-    use super::{AppState, Manager, mpsc, now_ms, report};
+    use super::{AppState, Emitter, Manager, mpsc, now_ms, report};
+    use nothingtodo_core::alarms::NotificationAction;
     use serde_json::json;
     use tauri::{
         AppHandle, Wry,
@@ -84,27 +85,81 @@ mod android {
             .map_err(|e| format!("Could not open notification settings: {e}"))
     }
 
-    async fn reconcile(app: &AppHandle) -> Result<(), String> {
-        let alarms = app
-            .state::<AppState>()
-            .store
-            .lock()
-            .await
-            .alarms(now_ms())?;
-        let reminders: Vec<_> = alarms
-            .iter()
-            .map(|a| json!({ "id": a.notification_id, "at": a.at, "title": a.title }))
-            .collect();
+    /// A notification button press from `Reminders.kt`'s action log.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Pressed {
+        key: String,
+        task_id: String,
+        remind_at: i64,
+        #[serde(flatten)]
+        action: NotificationAction,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct Actions {
+        actions: Vec<Pressed>,
+    }
+
+    /// Runs a blocking plugin call off the async threads.
+    async fn call<T: serde::de::DeserializeOwned + Send + 'static>(
+        app: &AppHandle,
+        command: &'static str,
+        payload: serde_json::Value,
+    ) -> Result<T, String> {
         let app = app.clone();
-        // Plugin calls block on the Android side.
         tauri::async_runtime::spawn_blocking(move || {
             app.state::<Scheduler>()
                 .0
-                .run_mobile_plugin::<()>("schedule", json!({ "reminders": reminders }))
-                .map_err(|e| format!("Could not schedule reminders: {e}"))
+                .run_mobile_plugin(command, payload)
+                .map_err(|e| format!("Reminder scheduling failed ({command}): {e}"))
         })
         .await
         .map_err(|_| "Reminder scheduling stopped unexpectedly.".to_string())?
+    }
+
+    /// Applies notification button presses, then hands the current list to Android. Presses are
+    /// applied before the list is built, so a reminder completed from its notification is not
+    /// scheduled again.
+    async fn reconcile(app: &AppHandle) -> Result<(), String> {
+        let pressed: Actions = call(app, "actions", json!({})).await?;
+        let state = app.state::<AppState>();
+        if !pressed.actions.is_empty() {
+            let mut changed = false;
+            {
+                let mut store = state.store.lock().await;
+                for p in &pressed.actions {
+                    changed |= store.apply_notification_action(
+                        &p.task_id,
+                        p.remind_at,
+                        &p.action,
+                        now_ms(),
+                    )?;
+                }
+            }
+            if changed {
+                let _ = state
+                    .sync_trigger
+                    .try_send(crate::sync_worker::Trigger::Edited);
+            }
+            let _ = app.emit("tasks-changed", ());
+            let keys: Vec<&str> = pressed.actions.iter().map(|p| p.key.as_str()).collect();
+            call::<()>(app, "acknowledgeActions", json!({ "keys": keys })).await?;
+        }
+        let alarms = state.store.lock().await.alarms(now_ms())?;
+        let reminders: Vec<_> = alarms
+            .iter()
+            .map(|a| {
+                json!({
+                    "id": a.notification_id,
+                    "at": a.at,
+                    "title": a.title,
+                    "taskId": a.task_id,
+                    "remindAt": a.remind_at,
+                })
+            })
+            .collect();
+        call(app, "schedule", json!({ "reminders": reminders })).await
     }
 }
 

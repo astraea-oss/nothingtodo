@@ -26,3 +26,4 @@
 -keep class uk.co.astraeaoss.nothingtodo.ReminderPlugin { *; }
 -keep class uk.co.astraeaoss.nothingtodo.ScheduledReminder { *; }
 -keep class uk.co.astraeaoss.nothingtodo.ScheduleArgs { *; }
+-keep class uk.co.astraeaoss.nothingtodo.AcknowledgeArgs { *; }

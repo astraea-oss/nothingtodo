@@ -308,8 +308,10 @@ async function start() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     syncOnReturn();
-    // The user may have changed the permission in system settings.
+    // The user may have changed the permission in system settings, or pressed notification
+    // buttons while the app was in the background.
     void checkNotifications();
+    void invoke('refresh_reminders');
   });
   await refresh();
   await wakeSync();
