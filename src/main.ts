@@ -5,84 +5,111 @@ import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notif
 
 interface Task { schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null }
 interface Remote { key: string; value: Task | null; version: number; deleted: boolean }
-interface TaskRecord { task: Task | null; version: number; dirty: boolean; conflict: Remote | null; notifiedAt: number | null }
-interface SyncStatus { connected: boolean; syncing: boolean; lastSyncedAt: number | null; error: string | null; retryInSeconds: number | null }
+interface TaskRecord { task: Task | null; version: number; dirty: boolean; conflict: Remote | null; notifiedAt: number | null; localRevision: number; snooze: { of: number; until: number } | null }
+interface SyncStatus {
+  connected: boolean; remembered: boolean; syncing: boolean; catchingUp: boolean; lastSyncedAt: number | null;
+  error: string | null; retryInSeconds: number | null; notice: string | null;
+}
 interface Snapshot { records: Record<string, TaskRecord>; cursor: number; binding: string | null }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
 root.innerHTML = `
   <main>
-    <header><h1>NothingToDo</h1><p>Todos and reminders</p></header>
+    <header class="app-header">
+      <div><h1>NothingToDo</h1><p class="tagline">Todos and reminders</p></div>
+      <p id="sync-badge" class="badge" role="status" aria-live="polite"></p>
+    </header>
     <p id="status" role="status" aria-live="polite"></p>
-    <section aria-labelledby="editor-heading">
+    <section class="card" aria-labelledby="editor-heading">
       <h2 id="editor-heading">New task</h2>
       <form id="task-form">
-        <label>Title <input name="title" required maxlength="500" autocomplete="off"></label>
-        <label>Notes <textarea name="notes" maxlength="8000" rows="3"></textarea></label>
+        <label>Title <input name="title" required maxlength="500" autocomplete="off" placeholder="What needs doing?"></label>
+        <label>Notes <textarea name="notes" maxlength="8000" rows="2"></textarea></label>
         <label>Remind me <input name="remindAt" type="datetime-local"></label>
-        <p class="hint">Dates use this device’s timezone. Reminders currently require the app to be running.</p>
-        <div class="actions"><button type="submit">Save task</button><button id="cancel-edit" type="button" hidden>Cancel edit</button></div>
+        <p class="hint">Dates use this device’s timezone. Reminders currently need the app to be running.</p>
+        <div class="actions"><button class="primary" type="submit">Save task</button><button id="cancel-edit" type="button" hidden>Cancel edit</button></div>
       </form>
     </section>
     <section aria-labelledby="list-heading">
-      <h2 id="list-heading">Tasks</h2>
-      <label>Show <select id="filter"><option value="active">Active</option><option value="all">All</option><option value="completed">Completed</option></select></label>
-      <ul id="tasks"></ul><p id="empty" hidden>No tasks here yet.</p>
+      <div class="list-header">
+        <h2 id="list-heading">Tasks</h2>
+        <label class="inline">Show <select id="filter"><option value="active">Active</option><option value="all">All</option><option value="completed">Completed</option></select></label>
+      </div>
+      <ul id="tasks"></ul><p id="empty" class="empty" hidden>No tasks here yet.</p>
+      <p id="sync-counts" class="hint"></p>
     </section>
-    <section aria-labelledby="settings-heading">
-      <h2 id="settings-heading">Reminders and sync</h2>
+    <details class="card" id="settings">
+      <summary><h2>Reminders and sync</h2></summary>
       <button id="notifications" type="button">Enable notifications</button>
-      <p class="hint">Sync runs automatically after connecting, after edits, and every 30 seconds while active. Reconnect after restarting; your token stays in memory for this session.</p>
+      <p class="hint">Sync runs after connecting, after edits, and every 30 seconds while the app is running.</p>
       <form id="sync-form">
         <label>API origin <input name="endpoint" type="url" value="https://api.astraeaoss.co.uk" required></label>
         <label>Account token <input name="token" type="password" autocomplete="off" spellcheck="false" required></label>
-        <button type="submit">Connect for this session</button>
+        <label class="check"><input name="remember" type="checkbox" checked> Remember on this device (system keyring)</label>
+        <button class="primary" type="submit">Connect</button>
       </form>
-      <button id="sync" type="button" disabled>Sync now</button>
-      <p id="sync-status" role="status"></p>
+      <div id="sync-connected" class="actions" hidden>
+        <button id="sync" type="button">Sync now</button>
+        <button id="disconnect" type="button">Disconnect</button>
+      </div>
       <p id="sync-connection" role="status" aria-live="polite"></p>
-    </section>
+      <p id="sync-notice" class="notice" role="status"></p>
+    </details>
   </main>`;
 
-const form = document.querySelector<HTMLFormElement>('#task-form')!;
-const list = document.querySelector<HTMLUListElement>('#tasks')!;
-const filter = document.querySelector<HTMLSelectElement>('#filter')!;
-const syncButton = document.querySelector<HTMLButtonElement>('#sync')!;
-const cancelEdit = document.querySelector<HTMLButtonElement>('#cancel-edit')!;
+const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
+const form = $<HTMLFormElement>('#task-form');
+const syncForm = $<HTMLFormElement>('#sync-form');
+const list = $<HTMLUListElement>('#tasks');
+const filter = $<HTMLSelectElement>('#filter');
+const cancelEdit = $<HTMLButtonElement>('#cancel-edit');
 let data: Snapshot = { records: {}, cursor: 0, binding: null };
 let editing: string | null = null;
 let busy = false;
-let syncConnected = false;
+let sync: SyncStatus = {
+  connected: false, remembered: false, syncing: false, catchingUp: false,
+  lastSyncedAt: null, error: null, retryInSeconds: null, notice: null,
+};
 
 function showSyncStatus(state: SyncStatus) {
-  syncConnected = state.connected;
-  syncButton.disabled = busy || !state.connected;
-  const message = !state.connected ? 'Connect to enable automatic sync.'
+  const rerender = sync.connected !== state.connected;
+  sync = state;
+  if (rerender) render();
+  syncForm.hidden = state.connected;
+  $<HTMLElement>('#sync-connected').hidden = !state.connected;
+  const message = !state.connected ? 'Not connected. Tasks are stored on this device only.'
+    : state.catchingUp ? 'Downloading sync history…'
     : state.syncing ? 'Syncing…'
-    : state.error ? `${state.error} Retrying automatically in up to ${state.retryInSeconds ?? 300}s.`
-    : state.lastSyncedAt !== null ? `Last synced ${new Date(state.lastSyncedAt).toLocaleTimeString()}. Automatic sync is on.`
-    : 'Automatic sync is ready.';
-  document.querySelector('#sync-connection')!.textContent = message;
+    : state.error ? `${state.error} Retrying automatically in ${state.retryInSeconds ?? 300}s.`
+    : state.lastSyncedAt !== null ? `Last synced ${new Date(state.lastSyncedAt).toLocaleTimeString()}.`
+    : 'Connected.';
+  const remembered = state.connected ? (state.remembered ? ' Reconnects automatically after restarting.' : ' Connected for this session only.') : '';
+  $('#sync-connection').textContent = message + remembered;
+  $('#sync-notice').textContent = state.notice ?? '';
+  const badge = $<HTMLElement>('#sync-badge');
+  badge.textContent = !state.connected ? 'Offline' : state.error ? 'Sync error' : state.syncing || state.catchingUp ? 'Syncing' : 'Synced';
+  badge.dataset.state = !state.connected ? 'offline' : state.error ? 'error' : 'ok';
 }
 
 async function wakeSync() {
-  if (syncConnected) await invoke('sync_now');
+  if (sync.connected) await invoke('sync_now');
 }
 
-function status(message: string) { document.querySelector('#status')!.textContent = message; }
+function status(message: string) { $('#status').textContent = message; }
 function field(name: string) { return form.elements.namedItem(name) as HTMLInputElement | HTMLTextAreaElement; }
 function resetEditor() {
   editing = null; form.reset(); cancelEdit.hidden = true;
-  document.querySelector('#editor-heading')!.textContent = 'New task';
+  $('#editor-heading').textContent = 'New task';
 }
 function localDate(time: number | null) {
   if (time === null) return '';
   const date = new Date(time);
   return new Date(time - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
-function button(label: string, action: () => Promise<void> | void) {
+function button(label: string, action: () => Promise<void> | void, className?: string) {
   const element = document.createElement('button');
   element.type = 'button'; element.textContent = label;
+  if (className) element.className = className;
   element.addEventListener('click', () => { void run(action); });
   return element;
 }
@@ -90,14 +117,13 @@ async function run(action: () => Promise<void> | void) {
   if (busy) return;
   busy = true;
   root.setAttribute('aria-busy', 'true');
-  const controls = [...root.querySelectorAll<HTMLButtonElement>('button')].map(b => [b, b.disabled] as const);
+  const controls = [...root.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button, input[type=checkbox]')].map(b => [b, b.disabled] as const);
   controls.forEach(([b]) => { b.disabled = true; });
   try { await action(); }
   catch (error) { status(String(error)); }
   finally {
     busy = false; root.removeAttribute('aria-busy');
     controls.forEach(([b, disabled]) => { b.disabled = disabled; });
-    syncButton.disabled = !syncConnected;
   }
 }
 async function refresh() {
@@ -107,50 +133,97 @@ async function refresh() {
 async function save(id: string, task: Task) {
   await invoke('save_task', { id, task }); await refresh();
 }
+
+// When this device will notify: the synced time, or a local snooze of that time. Mirrors the core.
+function reminderAt(record: TaskRecord) {
+  const remindAt = record.task?.remindAt ?? null;
+  const snooze = record.snooze;
+  return remindAt !== null && snooze?.of === remindAt && snooze.until > remindAt ? snooze.until : remindAt;
+}
+
+// Active first, then soonest reminder, then title.
+function compare([, a]: [string, TaskRecord], [, b]: [string, TaskRecord]) {
+  const ta = a.task, tb = b.task;
+  if (!ta || !tb) return ta ? -1 : tb ? 1 : 0;
+  if (ta.completed !== tb.completed) return ta.completed ? 1 : -1;
+  const ra = reminderAt(a) ?? Infinity, rb = reminderAt(b) ?? Infinity;
+  return ra !== rb ? ra - rb : ta.title.localeCompare(tb.title);
+}
+
 function render() {
   list.replaceChildren();
-  const entries = Object.entries(data.records).sort(([a], [b]) => a.localeCompare(b));
-  for (const [id, record] of entries) {
+  const now = Date.now();
+  for (const [id, record] of Object.entries(data.records).sort(compare)) {
     const task = record.task;
     if (!record.conflict && (!task || (filter.value === 'active' && task.completed) || (filter.value === 'completed' && !task.completed))) continue;
     const li = document.createElement('li');
+    li.className = 'task';
     if (task) {
-      const title = document.createElement('h3'); title.textContent = task.title; li.append(title);
-      const meta = document.createElement('p');
-      meta.textContent = `${task.completed ? 'Completed' : 'Active'} · ${record.dirty ? 'Pending sync' : 'Synced'}${task.remindAt !== null ? ` · Reminder: ${new Date(task.remindAt).toLocaleString()}` : ''}`;
-      li.append(meta);
+      li.classList.toggle('done', task.completed);
+      const head = document.createElement('div'); head.className = 'task-head';
+      const check = document.createElement('input');
+      check.type = 'checkbox'; check.checked = task.completed;
+      check.setAttribute('aria-label', task.completed ? `Reopen ${task.title}` : `Complete ${task.title}`);
+      check.addEventListener('change', () => { void run(() => save(id, { ...task, completed: check.checked })); });
+      const title = document.createElement('h3'); title.textContent = task.title;
+      head.append(check, title);
+      li.append(head);
+      const meta = document.createElement('p'); meta.className = 'meta';
+      const due = reminderAt(record);
+      if (task.remindAt !== null && due !== null) {
+        const reminder = document.createElement('span');
+        reminder.className = !task.completed && due <= now ? 'reminder overdue' : 'reminder';
+        reminder.textContent = `⏰ ${new Date(task.remindAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`;
+        meta.append(reminder);
+        if (due !== task.remindAt && !task.completed) {
+          const snoozed = document.createElement('span');
+          snoozed.textContent = `Snoozed on this device until ${new Date(due).toLocaleTimeString([], { timeStyle: 'short' })}`;
+          meta.append(snoozed);
+        }
+      }
+      if (record.dirty && sync.connected) {
+        const pending = document.createElement('span'); pending.className = 'pending';
+        pending.textContent = 'Not yet synced'; meta.append(pending);
+      }
+      if (meta.childElementCount) li.append(meta);
       if (task.notes) { const notes = document.createElement('p'); notes.className = 'notes'; notes.textContent = task.notes; li.append(notes); }
       const actions = document.createElement('div'); actions.className = 'actions';
-      actions.append(button(task.completed ? 'Reopen' : 'Complete', () => save(id, { ...task, completed: !task.completed })), button('Edit', () => {
+      actions.append(button('Edit', () => {
         editing = id; field('title').value = task.title; field('notes').value = task.notes;
         field('remindAt').value = localDate(task.remindAt); cancelEdit.hidden = false;
-        document.querySelector('#editor-heading')!.textContent = 'Edit task'; field('title').focus();
+        $('#editor-heading').textContent = 'Edit task'; field('title').focus();
+        form.scrollIntoView({ behavior: 'smooth' });
       }));
-      if (!task.completed && task.remindAt !== null) actions.append(button('Snooze 10 min', () => save(id, { ...task, remindAt: Date.now() + 600_000 })));
+      // Only a reminder that has gone off can be snoozed; snoozing earlier would bring it forward.
+      if (!task.completed && due !== null && due <= now) actions.append(button('Snooze 10 min', async () => { await invoke('snooze_task', { id, minutes: 10 }); await refresh(); }));
       actions.append(button('Delete', async () => {
         await invoke('delete_task', { id }); if (editing === id) resetEditor(); await refresh();
-      }));
+      }, 'danger'));
       li.append(actions);
     } else {
-      const label = document.createElement('h3'); label.textContent = 'Locally deleted task'; li.append(label);
+      const label = document.createElement('h3'); label.textContent = 'Deleted on this device'; li.append(label);
     }
     if (record.conflict) {
       const conflict = document.createElement('div'); conflict.className = 'conflict';
       const message = document.createElement('p');
-      message.textContent = `Sync conflict. Server version: ${record.conflict.deleted ? 'deleted' : record.conflict.value?.title}. Choose which version to keep. Your choice will sync automatically.`;
-      const remote = document.createElement('pre'); remote.textContent = JSON.stringify(record.conflict.value, null, 2);
-      conflict.append(message, remote, button('Keep local', async () => {
+      const remote = record.conflict.value;
+      message.textContent = `This task was changed on another device. Server version: ${record.conflict.deleted || !remote ? 'deleted' : `“${remote.title}”${remote.completed ? ' (completed)' : ''}`}. Choose which version to keep.`;
+      const details = document.createElement('pre'); details.textContent = JSON.stringify(remote, null, 2);
+      const actions = document.createElement('div'); actions.className = 'actions';
+      actions.append(button('Keep this device’s version', async () => {
         await invoke('resolve_conflict', { id, keepLocal: true }); await refresh();
-      }), button('Use server', async () => {
+      }, 'primary'), button('Use server version', async () => {
         await invoke('resolve_conflict', { id, keepLocal: false }); if (editing === id) resetEditor(); await refresh();
       }));
+      conflict.append(message, details, actions);
       li.append(conflict);
     }
     list.append(li);
   }
-  document.querySelector<HTMLElement>('#empty')!.hidden = list.children.length > 0;
+  $<HTMLElement>('#empty').hidden = list.children.length > 0;
   const records = Object.values(data.records);
-  document.querySelector('#sync-status')!.textContent = `${records.filter(r => r.dirty).length} pending · ${records.filter(r => r.conflict).length} conflicts`;
+  const pending = records.filter(r => r.dirty).length, conflicts = records.filter(r => r.conflict).length;
+  $('#sync-counts').textContent = sync.connected && (pending || conflicts) ? `${pending} not yet synced · ${conflicts} conflicts` : '';
 }
 
 form.addEventListener('submit', event => {
@@ -167,24 +240,28 @@ form.addEventListener('submit', event => {
 });
 cancelEdit.addEventListener('click', resetEditor);
 filter.addEventListener('change', render);
-document.querySelector('#notifications')!.addEventListener('click', () => { void run(async () => {
+const notificationsButton = $<HTMLButtonElement>('#notifications');
+notificationsButton.addEventListener('click', () => { void run(async () => {
   const granted = await isPermissionGranted() || await requestPermission() === 'granted';
+  notificationsButton.hidden = granted;
   status(granted ? 'Notifications enabled. Keep the app running for reminders.' : 'Notifications are blocked. Check system settings.');
 }); });
-document.querySelector<HTMLFormElement>('#sync-form')!.addEventListener('submit', event => {
+syncForm.addEventListener('submit', event => {
   event.preventDefault();
-  const syncForm = event.currentTarget as HTMLFormElement;
   void run(async () => {
-    const token = syncForm.elements.namedItem('token') as HTMLInputElement;
+    const value = (name: string) => syncForm.elements.namedItem(name) as HTMLInputElement;
     try {
-      await invoke('connect_sync', { endpoint: (syncForm.elements.namedItem('endpoint') as HTMLInputElement).value, token: token.value });
-      syncConnected = true;
-      status('Automatic sync connected for this session.');
-    } finally { token.value = ''; }
-  }).then(() => { if (syncConnected) syncButton.disabled = false; });
+      await invoke('connect_sync', { endpoint: value('endpoint').value, token: value('token').value, remember: value('remember').checked });
+      status('Sync connected.');
+    } finally { value('token').value = ''; }
+  });
 });
-syncButton.addEventListener('click', () => { void run(async () => {
+$('#sync').addEventListener('click', () => { void run(async () => {
   await invoke('sync_now'); status('Sync requested.');
+}); });
+$('#disconnect').addEventListener('click', () => { void run(async () => {
+  await invoke('disconnect_sync');
+  status('Sync disconnected. Tasks stay on this device; reconnect with the same account to continue syncing.');
 }); });
 
 async function start() {
@@ -197,6 +274,8 @@ async function start() {
   await listen<string>('reminder-error', event => status(`Could not save reminder receipt: ${event.payload}`));
   await listen<SyncStatus>('sync-status', event => showSyncStatus(event.payload));
   showSyncStatus(await invoke<SyncStatus>('sync_status'));
+  notificationsButton.hidden = await isPermissionGranted();
+  if (!sync.connected) $<HTMLDetailsElement>('#settings').open = true;
   // Reconnection and foreground signals complement the native worker's periodic retry.
   window.addEventListener('online', () => { void wakeSync().catch(error => status(String(error))); });
   window.addEventListener('focus', () => { void wakeSync().catch(error => status(String(error))); });
