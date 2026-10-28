@@ -23,3 +23,31 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test -p nothingtodo-core --locked
       - run: npm run tauri build -- --debug --no-bundle
+  android:
+    # Compile check only. Device behaviour (notifications, Keystore, HTTPS) still needs a phone.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+      - name: Android clippy and debug APK
+        run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          bin="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC_aarch64_linux_android="$bin/aarch64-linux-android24-clang" \
+          AR_aarch64_linux_android="$bin/llvm-ar" \
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$bin/aarch64-linux-android24-clang" \
+            cargo clippy -p nothingtodo --target aarch64-linux-android --locked -- -D warnings
+          npm run tauri android build -- --debug --apk --target aarch64 --ci
