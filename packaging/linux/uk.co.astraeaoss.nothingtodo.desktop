@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NothingToDo
+Comment=Offline-first tasks and reminders
+Exec=nothingtodo
+TryExec=nothingtodo
+Icon=uk.co.astraeaoss.nothingtodo
+Terminal=false
+Categories=Office;ProjectManagement;
+StartupWMClass=nothingtodo

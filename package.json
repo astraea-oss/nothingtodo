@@ -1,6 +1,7 @@
 {
   "name": "nothingtodo",
   "private": true,
+  "license": "GPL-3.0-or-later",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
@@ -11,7 +12,9 @@
     "check": "tsc --noEmit",
     "check:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
     "test:core": "cargo test -p nothingtodo-core",
-    "test:sync": "node scripts/test-sync.mjs"
+    "test:sync": "node scripts/test-sync.mjs",
+    "package:linux": "node scripts/package-linux.mjs",
+    "package:android": "node scripts/package-android.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
