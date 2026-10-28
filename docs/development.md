@@ -141,3 +141,89 @@ Acceptance: justify normalization with measurements or a specific capability req
 Add recurring reminders, standalone alarms, lists/tags, search and keyboard shortcuts incrementally. Specify recurrence timezone/DST behavior, completion and local snooze interaction first. Use explicit compatibility/schema capabilities from 0b; optional fields alone do not make changed behavior safe for older clients. Apply the rollout gate before introducing new record types or incompatible writes.
 
 Acceptance: each feature has defined semantics, migration/backup coverage and mixed-client tests; older supported clients preserve additive fields and cannot perform unsupported behavioral edits. Recurrence and standalone alarms additionally pass device lifecycle, permission and scheduling tests without regressing one-shot reminders.
+
+### 5a. Entry types, recurrence and warnings
+
+Planned, not implemented. Designed on 2026-10-28 in `docs/design/ui-directions.html` (tabs 02 "Entry types" and 03 "Adding"). This milestone defines the recurrence and standalone-alarm work from milestone 5. It depends on the compatibility and rollout rules from 0b and the native execution foundation from 3a.
+
+**Entry model.** Each task gains a `kind`:
+
+- **Alarm:** needs an immediate response. Requires a time. Rings until the user stops it (press-and-hold), with one-tap snooze.
+- **Reminder:** worth a nudge at the time. Requires a time. Plays one sound at the time, then stays as a notification. Existing tasks migrate to reminders.
+- **Marker** (working name): holidays, birthdays and deadlines. No time, just a local date or a span of dates. Silent on the day itself.
+
+Fields:
+
+- **Required:** title, kind and when. The kind is guessed from input and the user can change it. For alarms and reminders, "when" is an instant; for markers it is a local date or date range.
+- **Optional:**
+  - duration;
+  - one repeat rule;
+  - any number of warnings before the entry;
+  - `notes`, which replaces the separate description and notes ideas. Its first line serves as the summary.
+- **Sound:** follows the kind. A per-entry override can come later.
+
+Repeat presets are 8 hours, daily, weekly, 28 days, 1, 3, 4, 6 and 12 months, and custom. Daily and weekly repeats take an optional set of weekdays, so an alarm can run Monday to Friday; "weekdays", "weekends" and "every day" are shortcuts for that set. Warnings are offsets such as 5 minutes, 1 day or 1 week. Markers can also use "morning of", a local time defaulting to 09:00.
+
+**Engineering requirements:**
+
+- **Schema.** Kind, date-only "when", duration, repeat rules and warnings change behaviour, not just display. Introduce them as task schema version 2 using the capability rules from 0b.
+  - Supported clients that don't understand version 2 keep those records read-only and preserve their fields.
+  - Migrate version 1 tasks to reminders, keeping `notes`.
+  - Publish a minimum client version before any device writes version 2 records.
+- **Time semantics.** Fixed intervals (8 hours, 28 days) are exact durations from the anchor instant. Calendar repeats (daily, weekly, months, yearly), including any weekday set, use local wall-clock time in a stored IANA timezone, so they keep their local time across DST and travel. This is the floating-time model that one-shot reminders deliberately lack.
+  - Compute each occurrence from the anchor, not from the previous occurrence. That way a monthly repeat clamped to 28 February returns to the 31st in March.
+  - Define leap-day behaviour for yearly repeats.
+  - Markers are local dates and never shift with the timezone.
+- **Series editing and completion.** Define these before building the UI:
+  - completing one occurrence versus ending the series;
+  - editing "this occurrence" versus "this and following";
+  - how deletions and tombstones apply to single occurrences;
+  - how conflicting edits to a repeat rule are resolved. Explicit resolution is the default, as in milestone 4.
+- **Scheduling.** The 3a desired-alarm function expands occurrences × warnings over a bounded horizon and re-expands as occurrences pass.
+  - Each warning is its own notification with its own ID, so the collision-safe ID mapping must cover (task, occurrence, warning).
+  - Android limits how many alarms an app can have pending. Keep the horizon and alarm count well under that limit.
+  - Apply the missed-reminder policy per occurrence, so an app closed for a day doesn't fire a backlog of 8-hourly doses.
+- **Alarm delivery.** Ringing until stopped is a separate native path from the notification plugin's one-shot schedule.
+  - **Android:** use an alarm-clock alarm (`AlarmManager.setAlarmClock`) and a full-screen alert that loops audio on the alarm stream until stopped or snoozed.
+  - **Android 14+ permission:** full-screen intents are a special permission there. Check `NotificationManager.canUseFullScreenIntent()` and fall back to a heads-up notification when it is denied.
+  - **Exact alarms:** the exact-alarm permission rules from 3a still apply.
+  - **Linux:** the tray process plays the sound until stopped. Nothing rings when the app isn't running, and the UI must say so.
+- **Markers.** Markers schedule nothing for the day itself. Their warnings are ordinary silent or one-sound notifications at the chosen local time.
+- **Cross-device behaviour.** Snooze stays device-local. Stopping an alarm on one device doesn't stop another device that is already ringing; document this together with the stale-alarm limits in 3b.
+
+Acceptance:
+
+- **Core tests:** recurrence expansion across DST changes, month ends and leap years; warning expansion and horizon limits; version 1 to 2 migration; mixed-client replay where version 1 clients stay read-only.
+- **Device tests:** alarms ringing with the screen off, the phone locked and the process killed; full-screen permission denied; reboot; backlog suppression after the app has been closed.
+- **Regressions:** none in one-shot reminders.
+
+### 5b. Interface direction and adding entries
+
+Planned, not implemented. Agreed on 2026-10-28 from `docs/design/ui-directions.html`, which records the options considered and the "Decided" slide. Styling stays in `src/styles.css`. The adding fields depend on 5a; the list and strip can start earlier with today's reminders.
+
+**Visual language.** Follows Nothing's style: black and white, a dot-matrix font for numerals and headings, dot textures and dot instruments instead of icons.
+
+- Red is reserved for now, overdue, conflicts and a ringing alarm. It appears once as the signature dot on the Add button.
+- Entry types are shapes (tab 02 · A): alarm a filled double ring, reminder a hollow ring, marker a square.
+- No free-time visualisation anywhere.
+
+**Main view (leading direction: 02 Strip, tab 01).**
+
+- A week strip of square day cells: weekday letter top left, date bottom right, load dots below, no outlines on unselected days.
+- Below it, upcoming entries as spreadsheet-like rows (time, shape, title, time until), grouped by day under plain day headings with no borders.
+- Markers sit at the top of their day as all-day rows. Alarms carry a small RINGS tag.
+
+**Adding (tab 03: B structure, B1 tiles, B2 instruments).**
+
+- **Short sheet:** title, round type keys (alarm, reminder, marker), the time in a dot readout, day chips (Today, tomorrow, the next day, Pick), a dot grip and Add. Most entries finish here: a title and a time.
+- **Pulled up:** every other field as a widget tile with big dot numerals. When, Duration, Repeat, Warn before, Sound, Snooze, Type and Notes. The title is the heading. Pull down to return to the short sheet.
+- **Tile edit:** tapping a tile opens it in place at full width with its presets while the others dim. There is no separate picker screen.
+- **Instruments (from B2):** drawn inside tiles where they help: a 24-hour dot dial for When, a dot bar for Duration, a dot timeline for Warn before, a dot ring for Repeat showing one cycle with occurrences lit, and a dot waveform for Sound.
+- **Repeat tile:** presets 8 h, Daily, Weekly, 28 d, 1, 3, 4, 6 and 12 months, and Custom. Daily and Weekly show day keys (M–S) with Weekdays, Weekends and All shortcuts, so an alarm can run Monday to Friday. The tile shows the next occurrences.
+- **Warn before tile:** pick any number of warnings (5 min to 1 month, plus "Day of" for markers), shown on a timeline before the start.
+- **Tiles follow the type:** markers have no Sound or Snooze tile; alarms ring until stopped.
+- **Typing stays a shortcut:** typed tokens such as `fri 8am`, `for 45m`, `weekdays 7am` and `warn 1w` fill the same tiles. Templates (recipes) are set aside and may return as saved presets.
+- **Notes** replaces the separate description and notes fields. Its first line shows as a summary under the title.
+- **Priority** describes how the three types differ. It is not a field.
+
+Acceptance: an entry with a title and time takes one line and one tap; every 5a field is reachable from the pulled-up sheet without leaving it; tiles show only the fields that apply to the type; the layout works one-handed on a phone and with a keyboard on Linux; light and dark themes both keep red for its reserved meanings.
