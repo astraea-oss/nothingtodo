@@ -1,14 +1,13 @@
 use nothingtodo_core::{Snapshot, Store, Task, sync::SyncClient};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_notification::NotificationExt;
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::{Mutex, mpsc};
 
 #[cfg(target_os = "android")]
 mod android;
 mod credentials;
 mod paths;
+mod reminders;
 mod sync_worker;
 mod window;
 use sync_worker::{SyncStatus, Trigger, update};
@@ -18,6 +17,15 @@ struct AppState {
     sync: Mutex<Option<Arc<SyncClient>>>,
     sync_status: Mutex<SyncStatus>,
     sync_trigger: mpsc::Sender<Trigger>,
+    reminder_trigger: mpsc::Sender<()>,
+}
+
+impl AppState {
+    /// After a local edit: upload it soon and bring scheduled reminders up to date.
+    fn edited(&self) {
+        let _ = self.sync_trigger.try_send(Trigger::Edited);
+        let _ = self.reminder_trigger.try_send(());
+    }
 }
 
 #[tauri::command]
@@ -32,7 +40,7 @@ async fn save_task(
     task: Task,
 ) -> Result<(), String> {
     state.store.lock().await.save_task(id, task)?;
-    let _ = state.sync_trigger.try_send(Trigger::Edited);
+    state.edited();
     Ok(())
 }
 
@@ -42,21 +50,21 @@ async fn snooze_task(state: State<'_, AppState>, id: String, minutes: i64) -> Re
     if !(1..=24 * 60).contains(&minutes) {
         return Err("Snooze for between 1 minute and 24 hours.".into());
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let now = reminders::now_ms();
     state
         .store
         .lock()
         .await
-        .snooze(&id, now, now + minutes * 60_000)
+        .snooze(&id, now, now + minutes * 60_000)?;
+    // Snoozes are never uploaded, so only the reminder schedule changes.
+    let _ = state.reminder_trigger.try_send(());
+    Ok(())
 }
 
 #[tauri::command]
 async fn delete_task(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state.store.lock().await.delete_task(&id)?;
-    let _ = state.sync_trigger.try_send(Trigger::Edited);
+    state.edited();
     Ok(())
 }
 
@@ -67,7 +75,7 @@ async fn resolve_conflict(
     keep_local: bool,
 ) -> Result<(), String> {
     state.store.lock().await.resolve(&id, keep_local)?;
-    let _ = state.sync_trigger.try_send(Trigger::Edited);
+    state.edited();
     Ok(())
 }
 
@@ -189,21 +197,27 @@ pub fn run() {
             window::show_main(app)
         }))
         .on_window_event(window::on_event);
+    let builder = builder.plugin(tauri_plugin_notification::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(reminders::plugin());
     builder
-        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             #[cfg(target_os = "android")]
             android::init_tls().map_err(std::io::Error::other)?;
             let paths = paths::AppPaths::resolve(app.handle()).map_err(std::io::Error::other)?;
             let store = Store::open(paths.database()).map_err(std::io::Error::other)?;
             let (sync_trigger, receiver) = mpsc::channel(16);
+            let (reminder_trigger, reminder_requests) = mpsc::channel(1);
             app.manage(AppState {
                 store: Mutex::new(store),
                 sync: Mutex::new(None),
                 sync_status: Mutex::new(SyncStatus::default()),
                 sync_trigger,
+                reminder_trigger,
             });
             tauri::async_runtime::spawn(sync_worker::run(app.handle().clone(), receiver));
+            tauri::async_runtime::spawn(reminders::run(app.handle().clone(), reminder_requests));
+            reminders::request(app.handle());
             tauri::async_runtime::spawn(restore_session(app.handle().clone()));
             #[cfg(desktop)]
             let tray = window::create_tray(app.handle());
@@ -216,39 +230,6 @@ pub fn run() {
             #[cfg(mobile)]
             let visible = true;
             window::create_main(app.handle(), &paths, visible)?;
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    let state = handle.state::<AppState>();
-                    let mut store = state.store.lock().await;
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
-                    if handle.notification().permission_state().ok()
-                        != Some(tauri_plugin_notification::PermissionState::Granted)
-                    {
-                        continue;
-                    }
-                    // Mobile suspension/termination requires native OS scheduling, a later milestone.
-                    for (id, task, due) in store.due(now) {
-                        if handle
-                            .notification()
-                            .builder()
-                            .title("NothingToDo reminder")
-                            .body(&task.title)
-                            .show()
-                            .is_err()
-                        {
-                            continue;
-                        }
-                        if let Err(error) = store.mark_notified(&id, due) {
-                            let _ = handle.emit("reminder-error", error);
-                        }
-                    }
-                }
-            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

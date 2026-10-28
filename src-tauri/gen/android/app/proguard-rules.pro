@@ -21,3 +21,8 @@
 #-renamesourcefileattribute SourceFile
 # Called from Rust over JNI only, so R8 cannot see the uses.
 -keep, includedescriptorclasses class org.rustls.platformverifier.** { *; }
+
+# Our Tauri plugin and its arguments are found and filled by reflection.
+-keep class uk.co.astraeaoss.nothingtodo.ReminderPlugin { *; }
+-keep class uk.co.astraeaoss.nothingtodo.ScheduledReminder { *; }
+-keep class uk.co.astraeaoss.nothingtodo.ScheduleArgs { *; }

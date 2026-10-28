@@ -1,4 +1,5 @@
 //! Platform-independent task storage and Astraea Sync protocol.
+pub mod alarms;
 pub mod migrations;
 pub mod schedule;
 pub mod sync;
@@ -95,6 +96,9 @@ pub struct Snapshot {
     pub records: BTreeMap<String, Record>,
     pub cursor: u64,
     pub binding: Option<String>,
+    /// Device-local and never synced. Absent in profiles written before OS scheduling.
+    #[serde(default)]
+    pub notification_ids: alarms::NotificationIds,
 }
 
 pub struct Store {

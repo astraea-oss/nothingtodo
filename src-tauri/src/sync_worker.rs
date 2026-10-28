@@ -115,5 +115,6 @@ pub async fn run(app: tauri::AppHandle, mut receiver: mpsc::Receiver<Trigger>) {
         })
         .await;
         let _ = app.emit("tasks-changed", ());
+        crate::reminders::request(&app);
     }
 }

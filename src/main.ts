@@ -26,7 +26,7 @@ root.innerHTML = `
         <label>Title <input name="title" required maxlength="500" autocomplete="off" placeholder="What needs doing?"></label>
         <label>Notes <textarea name="notes" maxlength="8000" rows="2"></textarea></label>
         <label>Remind me <input name="remindAt" type="datetime-local"></label>
-        <p class="hint">Dates use this device’s timezone. Reminders currently need the app to be running.</p>
+        <p class="hint">Dates use this device’s timezone. <span id="delivery-hint"></span></p>
         <div class="actions"><button class="primary" type="submit">Save task</button><button id="cancel-edit" type="button" hidden>Cancel edit</button></div>
       </form>
     </section>
@@ -251,6 +251,10 @@ form.addEventListener('submit', event => {
 });
 cancelEdit.addEventListener('click', resetEditor);
 filter.addEventListener('change', render);
+// Android schedules reminders with the OS; desktop shows them from the running app.
+$('#delivery-hint').textContent = /Android/i.test(navigator.userAgent)
+  ? 'Reminders fire even when the app is closed.'
+  : 'Reminders need the app running; closing the window keeps it in the tray.';
 const notificationsButton = $<HTMLButtonElement>('#notifications');
 notificationsButton.addEventListener('click', () => { void run(async () => {
   const granted = await isPermissionGranted() || await requestPermission() === 'granted';
