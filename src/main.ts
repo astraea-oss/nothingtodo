@@ -95,6 +95,17 @@ async function wakeSync() {
   if (sync.connected) await invoke('sync_now');
 }
 
+// Focus can fire many times a minute (with focus-follows-mouse, on every pass of the pointer), so
+// returning to the app syncs at most every 15 seconds. The worker's 30-second poll covers the rest.
+const RETURN_SYNC_COOLDOWN_MS = 15_000;
+let lastReturnSync = 0;
+function syncOnReturn() {
+  const recent = Math.max(lastReturnSync, sync.lastSyncedAt ?? 0);
+  if (sync.syncing || Date.now() - recent < RETURN_SYNC_COOLDOWN_MS) return;
+  lastReturnSync = Date.now();
+  void wakeSync().catch(error => status(String(error)));
+}
+
 function status(message: string) { $('#status').textContent = message; }
 function field(name: string) { return form.elements.namedItem(name) as HTMLInputElement | HTMLTextAreaElement; }
 function resetEditor() {
@@ -278,9 +289,9 @@ async function start() {
   if (!sync.connected) $<HTMLDetailsElement>('#settings').open = true;
   // Reconnection and foreground signals complement the native worker's periodic retry.
   window.addEventListener('online', () => { void wakeSync().catch(error => status(String(error))); });
-  window.addEventListener('focus', () => { void wakeSync().catch(error => status(String(error))); });
+  window.addEventListener('focus', syncOnReturn);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') void wakeSync().catch(error => status(String(error)));
+    if (document.visibilityState === 'visible') syncOnReturn();
   });
   await refresh();
   await wakeSync();
