@@ -67,6 +67,8 @@ impl Store {
             .state
             .records
             .iter()
+            // A newer schema may schedule differently; leave it to the app that understands it.
+            .filter(|(_, record)| record.editable())
             .filter_map(|(id, record)| {
                 let task = record.task.as_ref().filter(|task| !task.completed)?;
                 let at = record.reminder_at().filter(|&at| at > now)?;
@@ -116,7 +118,7 @@ impl Store {
         action: &NotificationAction,
         now: i64,
     ) -> Result<bool> {
-        let Some(record) = self.state.records.get(task_id) else {
+        let Some(record) = self.state.records.get(task_id).filter(|r| r.editable()) else {
             return Ok(false);
         };
         let Some(task) = record.task.as_ref().filter(|task| !task.completed) else {
@@ -156,6 +158,7 @@ mod tests {
             notes: "".into(),
             completed: false,
             remind_at,
+            extra: Default::default(),
         }
     }
 

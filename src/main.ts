@@ -5,7 +5,7 @@ import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notif
 
 interface Task { schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null }
 interface Remote { key: string; value: Task | null; version: number; deleted: boolean }
-interface TaskRecord { task: Task | null; version: number; dirty: boolean; conflict: Remote | null; notifiedAt: number | null; localRevision: number; snooze: { of: number; until: number } | null }
+interface TaskRecord { task: Task | null; version: number; dirty: boolean; conflict: Remote | null; notifiedAt: number | null; localRevision: number; snooze: { of: number; until: number } | null; unsupported: { value: unknown; version: number } | null }
 interface SyncStatus {
   connected: boolean; remembered: boolean; syncing: boolean; catchingUp: boolean; lastSyncedAt: number | null;
   error: string | null; retryInSeconds: number | null; notice: string | null;
@@ -169,14 +169,15 @@ function render() {
   const now = Date.now();
   for (const [id, record] of Object.entries(data.records).sort(compare)) {
     const task = record.task;
-    if (!record.conflict && (!task || (filter.value === 'active' && task.completed) || (filter.value === 'completed' && !task.completed))) continue;
+    const readOnly = record.unsupported !== null;
+    if (!record.conflict && !readOnly && (!task || (filter.value === 'active' && task.completed) || (filter.value === 'completed' && !task.completed))) continue;
     const li = document.createElement('li');
     li.className = 'task';
     if (task) {
       li.classList.toggle('done', task.completed);
       const head = document.createElement('div'); head.className = 'task-head';
       const check = document.createElement('input');
-      check.type = 'checkbox'; check.checked = task.completed;
+      check.type = 'checkbox'; check.checked = task.completed; check.disabled = readOnly;
       check.setAttribute('aria-label', task.completed ? `Reopen ${task.title}` : `Complete ${task.title}`);
       check.addEventListener('change', () => { void run(() => save(id, { ...task, completed: check.checked })); });
       const title = document.createElement('h3'); title.textContent = task.title;
@@ -199,6 +200,11 @@ function render() {
         const pending = document.createElement('span'); pending.className = 'pending';
         pending.textContent = 'Not yet synced'; meta.append(pending);
       }
+      if (readOnly) {
+        const note = document.createElement('span'); note.className = 'pending';
+        note.textContent = 'Changed by a newer version of NothingToDo. Update the app to edit it.';
+        meta.append(note);
+      }
       if (meta.childElementCount) li.append(meta);
       if (task.notes) { const notes = document.createElement('p'); notes.className = 'notes'; notes.textContent = task.notes; li.append(notes); }
       const actions = document.createElement('div'); actions.className = 'actions';
@@ -213,7 +219,10 @@ function render() {
       actions.append(button('Delete', async () => {
         await invoke('delete_task', { id }); if (editing === id) resetEditor(); await refresh();
       }, 'danger'));
-      li.append(actions);
+      if (!readOnly) li.append(actions);
+    } else if (readOnly) {
+      const label = document.createElement('h3'); label.textContent = 'A task from a newer version of NothingToDo'; li.append(label);
+      const note = document.createElement('p'); note.className = 'meta pending'; note.textContent = 'Update the app to see and edit it.'; li.append(note);
     } else {
       const label = document.createElement('h3'); label.textContent = 'Deleted on this device'; li.append(label);
     }

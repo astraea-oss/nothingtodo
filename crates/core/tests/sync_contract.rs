@@ -12,6 +12,7 @@ fn task(title: &str) -> Task {
         notes: "Integration test".into(),
         completed: false,
         remind_at: None,
+        extra: Default::default(),
     }
 }
 

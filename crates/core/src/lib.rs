@@ -11,8 +11,13 @@ use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, String>;
 
+/// The task schema this version writes and fully understands. Records with another schema are
+/// kept read-only (see `Record::unsupported`), because a newer schema can change behaviour, not
+/// just add display fields.
+pub const SCHEMA_VERSION: u32 = 1;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct Task {
     pub schema_version: u32,
     pub title: String,
@@ -20,11 +25,16 @@ pub struct Task {
     pub completed: bool,
     /// UTC Unix milliseconds. None means no reminder.
     pub remind_at: Option<i64>,
+    /// Fields added by newer app versions within the same schema. They are additive by
+    /// definition (a behavioural change needs a new schema version), so they are kept and sent
+    /// back unchanged.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Task {
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != 1 {
+        if self.schema_version != SCHEMA_VERSION {
             return Err("Unsupported task schema; update the app before syncing.".into());
         }
         if self.title.trim().is_empty() || self.title.len() > 500 || self.notes.len() > 8000 {
@@ -62,6 +72,14 @@ pub struct Snooze {
     pub until: i64,
 }
 
+/// A payload this version cannot interpret, kept verbatim so it is never lost or overwritten.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Opaque {
+    pub value: Option<serde_json::Value>,
+    pub version: u64,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
@@ -76,9 +94,27 @@ pub struct Record {
     /// Absent in profiles written before snoozing became device-local.
     #[serde(default)]
     pub snooze: Option<Snooze>,
+    /// The latest server value was written by a newer app version in a schema this one does not
+    /// support. The record is then read-only here: it is not uploaded, edited or scheduled, and
+    /// `task` keeps the last value this version understood, for display. A pending local edit
+    /// keeps its old base version, so a newer client sees it as a conflict instead of it
+    /// overwriting newer data.
+    #[serde(default)]
+    pub unsupported: Option<Opaque>,
 }
 
 impl Record {
+    /// Whether this version may change the record.
+    pub fn editable(&self) -> bool {
+        self.unsupported.is_none()
+    }
+
+    /// The newest server version this device has seen for the record.
+    pub(crate) fn seen(&self) -> u64 {
+        self.version
+            .max(self.unsupported.as_ref().map_or(0, |u| u.version))
+    }
+
     /// When this device should next notify: the synced reminder time, or a later local snooze.
     /// A snooze can only delay a reminder, never bring it forward.
     pub fn reminder_at(&self) -> Option<i64> {
@@ -99,6 +135,10 @@ pub struct Snapshot {
     /// Device-local and never synced. Absent in profiles written before OS scheduling.
     #[serde(default)]
     pub notification_ids: alarms::NotificationIds,
+    /// Synced records whose keys are not task IDs, such as types added by newer app versions.
+    /// Kept so the cursor can advance past them; never uploaded or shown.
+    #[serde(default)]
+    pub foreign: BTreeMap<String, Opaque>,
 }
 
 pub struct Store {
@@ -160,6 +200,15 @@ impl Store {
             return Err("Invalid task ID.".into());
         }
         let record = state.records.entry(id.clone()).or_default();
+        if !record.editable() {
+            return Err("This task was changed by a newer version of NothingToDo. Update the app to edit it.".into());
+        }
+        // Editors only know this version's fields; keep any additive ones they left out.
+        if let Some(stored) = &record.task {
+            for (key, value) in &stored.extra {
+                task.extra.entry(key).or_insert_with(|| value.clone());
+            }
+        }
         if record.task.as_ref().map(|t| (t.remind_at, t.completed))
             != Some((task.remind_at, task.completed))
         {
@@ -176,6 +225,9 @@ impl Store {
     pub fn delete_task(&mut self, id: &str) -> Result<()> {
         let mut state = self.snapshot();
         let record = state.records.get_mut(id).ok_or("Task no longer exists.")?;
+        if !record.editable() {
+            return Err("This task was changed by a newer version of NothingToDo. Update the app to edit it.".into());
+        }
         record.task = None;
         record.dirty = true;
         record.notified_at = None;
@@ -187,6 +239,9 @@ impl Store {
     pub fn resolve(&mut self, id: &str, keep_local: bool) -> Result<()> {
         let mut state = self.snapshot();
         let record = state.records.get_mut(id).ok_or("Task no longer exists.")?;
+        if !record.editable() {
+            return Err("This task was changed by a newer version of NothingToDo. Update the app to edit it.".into());
+        }
         let remote = record.conflict.take().ok_or("No conflict to resolve.")?;
         record.version = remote.version;
         record.local_revision += 1;
@@ -206,6 +261,7 @@ impl Store {
         self.state
             .records
             .iter()
+            .filter(|(_, record)| record.editable())
             .filter_map(|(id, record)| {
                 let task = record.task.as_ref()?;
                 let due = record.reminder_at()?;
@@ -220,6 +276,9 @@ impl Store {
     pub fn snooze(&mut self, id: &str, now: i64, until: i64) -> Result<()> {
         let mut state = self.snapshot();
         let record = state.records.get_mut(id).ok_or("Task no longer exists.")?;
+        if !record.editable() {
+            return Err("This task was changed by a newer version of NothingToDo. Update the app to edit it.".into());
+        }
         let of = record
             .task
             .as_ref()
@@ -254,6 +313,7 @@ mod tests {
             notes: "".into(),
             completed: false,
             remind_at: Some(1000),
+            extra: Default::default(),
         }
     }
 
