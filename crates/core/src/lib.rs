@@ -1,8 +1,9 @@
 //! Platform-independent task storage and Astraea Sync protocol.
+pub mod migrations;
 pub mod schedule;
 pub mod sync;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 use uuid::Uuid;
@@ -51,7 +52,16 @@ pub struct Remote {
     pub deleted: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A device-local snooze of the reminder that was due at `of`. Never synced, and ignored once the
+/// task's reminder time changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snooze {
+    pub of: i64,
+    pub until: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Record {
     pub task: Option<Task>,
@@ -60,6 +70,23 @@ pub struct Record {
     pub conflict: Option<Remote>,
     /// Local delivery receipt, deliberately never synced between devices.
     pub notified_at: Option<i64>,
+    /// Incremented by every local edit, so sync can detect edits made during a request.
+    pub local_revision: u64,
+    /// Absent in profiles written before snoozing became device-local.
+    #[serde(default)]
+    pub snooze: Option<Snooze>,
+}
+
+impl Record {
+    /// When this device should next notify: the synced reminder time, or a later local snooze.
+    /// A snooze can only delay a reminder, never bring it forward.
+    pub fn reminder_at(&self) -> Option<i64> {
+        let remind_at = self.task.as_ref()?.remind_at?;
+        Some(match self.snooze {
+            Some(snooze) if snooze.of == remind_at && snooze.until > remind_at => snooze.until,
+            _ => remind_at,
+        })
+    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -73,26 +100,18 @@ pub struct Snapshot {
 pub struct Store {
     db: Connection,
     pub(crate) state: Snapshot,
-    persisted: Option<String>,
+    persisted: String,
 }
 
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let db = Connection::open(path).map_err(|e| e.to_string())?;
-        db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS app_state (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);")
+        let mut db = Connection::open(path).map_err(|e| e.to_string())?;
+        migrations::migrate(&mut db)?;
+        let json: String = db
+            .query_row("SELECT json FROM snapshot WHERE id=1", [], |row| row.get(0))
             .map_err(|e| e.to_string())?;
-        let json: Option<String> = db
-            .query_row("SELECT json FROM app_state WHERE id=1", [], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(|e| e.to_string())?;
-        let state = match &json {
-            Some(json) => {
-                serde_json::from_str(json).map_err(|e| format!("Cannot read saved data: {e}"))?
-            }
-            None => Snapshot::default(),
-        };
+        let state =
+            serde_json::from_str(&json).map_err(|e| format!("Cannot read saved data: {e}"))?;
         Ok(Self {
             db,
             state,
@@ -107,21 +126,23 @@ impl Store {
     /// Commit first, then expose the new state. Failed disk writes never acknowledge edits.
     pub(crate) fn commit(&mut self, state: Snapshot) -> Result<()> {
         let json = serde_json::to_string(&state).map_err(|e| e.to_string())?;
-        let changed = match &self.persisted {
-            Some(previous) => self.db.execute(
-                "UPDATE app_state SET json=?1 WHERE id=1 AND json=?2",
-                params![json, previous],
-            ),
-            None => self.db.execute(
-                "INSERT INTO app_state(id,json) VALUES(1,?1) ON CONFLICT(id) DO NOTHING",
-                params![json],
-            ),
-        }
-        .map_err(|e| e.to_string())?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| e.to_string())?;
+        // A newer binary may have migrated the profile since this process opened it.
+        migrations::ensure_current(&tx)?;
+        let changed = tx
+            .execute(
+                "UPDATE snapshot SET json=?1 WHERE id=1 AND json=?2",
+                params![json, self.persisted],
+            )
+            .map_err(|e| e.to_string())?;
         if changed != 1 {
             return Err("Another app instance changed this profile. Close other instances and restart before editing or syncing.".into());
         }
-        self.persisted = Some(json);
+        tx.commit().map_err(|e| e.to_string())?;
+        self.persisted = json;
         self.state = state;
         Ok(())
     }
@@ -134,20 +155,16 @@ impl Store {
         if Uuid::parse_str(&id).is_err() {
             return Err("Invalid task ID.".into());
         }
-        let record = state.records.entry(id.clone()).or_insert(Record {
-            task: None,
-            version: 0,
-            dirty: false,
-            conflict: None,
-            notified_at: None,
-        });
+        let record = state.records.entry(id.clone()).or_default();
         if record.task.as_ref().map(|t| (t.remind_at, t.completed))
             != Some((task.remind_at, task.completed))
         {
             record.notified_at = None;
+            record.snooze = None;
         }
         record.task = Some(task);
         record.dirty = true;
+        record.local_revision += 1;
         self.commit(state)?;
         Ok(id)
     }
@@ -158,6 +175,8 @@ impl Store {
         record.task = None;
         record.dirty = true;
         record.notified_at = None;
+        record.snooze = None;
+        record.local_revision += 1;
         self.commit(state)
     }
 
@@ -166,27 +185,48 @@ impl Store {
         let record = state.records.get_mut(id).ok_or("Task no longer exists.")?;
         let remote = record.conflict.take().ok_or("No conflict to resolve.")?;
         record.version = remote.version;
+        record.local_revision += 1;
         if keep_local {
             record.dirty = record.task != remote.value;
         } else {
             record.task = remote.value;
             record.dirty = false;
             record.notified_at = None;
+            record.snooze = None;
         }
         self.commit(state)
     }
 
-    pub fn due(&self, now: i64) -> Vec<(String, Task)> {
+    /// Reminders due on this device, with the instant each is due (a snooze moves it).
+    pub fn due(&self, now: i64) -> Vec<(String, Task, i64)> {
         self.state
             .records
             .iter()
             .filter_map(|(id, record)| {
                 let task = record.task.as_ref()?;
-                let due = task.remind_at?;
+                let due = record.reminder_at()?;
                 (!task.completed && due <= now && record.notified_at != Some(due))
-                    .then(|| (id.clone(), task.clone()))
+                    .then(|| (id.clone(), task.clone(), due))
             })
             .collect()
+    }
+
+    /// Snoozes a reminder that has gone off, on this device only. Nothing is uploaded, so other
+    /// devices keep the original time.
+    pub fn snooze(&mut self, id: &str, now: i64, until: i64) -> Result<()> {
+        let mut state = self.snapshot();
+        let record = state.records.get_mut(id).ok_or("Task no longer exists.")?;
+        let of = record
+            .task
+            .as_ref()
+            .filter(|task| !task.completed)
+            .and_then(|task| task.remind_at)
+            .ok_or("Only active tasks with a reminder can be snoozed.")?;
+        if record.reminder_at().is_none_or(|due| due > now) || until <= now {
+            return Err("Only a reminder that has gone off can be snoozed.".into());
+        }
+        record.snooze = Some(Snooze { of, until });
+        self.commit(state)
     }
 
     pub fn mark_notified(&mut self, id: &str, due: i64) -> Result<()> {
@@ -199,8 +239,6 @@ impl Store {
         self.commit(state)
     }
 }
-
-use rusqlite::OptionalExtension;
 
 #[cfg(test)]
 mod tests {
@@ -227,10 +265,19 @@ mod tests {
         drop(store);
         let mut store = Store::open(&path).unwrap();
         assert!(store.due(2000).is_empty());
-        let mut snoozed = task();
-        snoozed.remind_at = Some(3000);
-        store.save_task(Some(id.clone()), snoozed).unwrap();
-        assert_eq!(store.due(3000).len(), 1);
+        store.snooze(&id, 2000, 3000).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.due(2999).is_empty());
+        assert_eq!(store.due(3000)[0].2, 3000);
+        store.mark_notified(&id, 3000).unwrap();
+        assert!(store.due(4000).is_empty());
+        // Editing the reminder time drops the snooze.
+        let mut moved = task();
+        moved.remind_at = Some(2000);
+        store.save_task(Some(id.clone()), moved).unwrap();
+        assert_eq!(store.snapshot().records[&id].snooze, None);
+        assert_eq!(store.due(2000).len(), 1);
         store.delete_task(&id).unwrap();
         assert!(store.snapshot().records[&id].task.is_none());
         assert!(store.due(4000).is_empty());
