@@ -182,6 +182,11 @@ async fn sync_now(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_notification_settings(app: AppHandle) -> Result<(), String> {
+    reminders::open_notification_settings(&app)
+}
+
+#[tauri::command]
 async fn sync_status(state: State<'_, AppState>) -> Result<SyncStatus, String> {
     Ok(state.sync_status.lock().await.clone())
 }
@@ -241,7 +246,8 @@ pub fn run() {
             connect_sync,
             disconnect_sync,
             sync_now,
-            sync_status
+            sync_status,
+            open_notification_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running NothingToDo");

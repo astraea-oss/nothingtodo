@@ -8,7 +8,9 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import app.tauri.annotation.Command
@@ -168,6 +170,19 @@ class ReminderPlugin(private val activity: Activity) : Plugin(activity) {
   fun schedule(invoke: Invoke) {
     val args = invoke.parseArgs(ScheduleArgs::class.java)
     Reminders.replace(activity.applicationContext, args.reminders.map { Reminders.Reminder(it.id, it.at, it.title) })
+    invoke.resolve()
+  }
+
+  /** Android stops showing the permission prompt after a refusal; settings can still allow it. */
+  @Command
+  fun openNotificationSettings(invoke: Invoke) {
+    val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+        .putExtra(Settings.EXTRA_APP_PACKAGE, activity.packageName)
+    } else {
+      Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", activity.packageName, null))
+    }
+    activity.startActivity(intent)
     invoke.resolve()
   }
 }

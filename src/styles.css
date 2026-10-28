@@ -75,6 +75,9 @@ details > summary::after { content: "▸"; float: right; color: var(--muted); }
 details[open] > summary::after { content: "▾"; }
 details[open] > summary { margin-bottom: .75rem; }
 
+.warning { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem 1rem; border: 2px solid var(--warn); border-radius: var(--radius); background: var(--surface); padding: .75rem 1rem; margin: 0 0 1rem; }
+.warning[hidden] { display: none; }
+.warning p { margin: 0; font-weight: 600; }
 #status { background: var(--surface); border-left: 3px solid var(--accent); border-radius: .25rem; padding: .5rem .75rem; margin: 0 0 1rem; }
 #status:empty, .notice:empty, #sync-connection:empty { display: none; }
 .notice { color: var(--warn); font-size: .9rem; }

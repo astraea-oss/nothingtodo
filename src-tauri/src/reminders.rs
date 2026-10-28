@@ -29,7 +29,12 @@ fn report(app: &AppHandle, error: String) {
 }
 
 #[cfg(target_os = "android")]
-pub use android::{plugin, run};
+pub use android::{open_notification_settings, plugin, run};
+
+#[cfg(not(target_os = "android"))]
+pub fn open_notification_settings(_: &AppHandle) -> Result<(), String> {
+    Err("Turn on notifications for NothingToDo in your desktop's notification settings.".into())
+}
 
 #[cfg(target_os = "android")]
 mod android {
@@ -70,6 +75,13 @@ mod android {
                 attempt += 1;
             }
         }
+    }
+
+    pub fn open_notification_settings(app: &AppHandle) -> Result<(), String> {
+        app.state::<Scheduler>()
+            .0
+            .run_mobile_plugin::<()>("openNotificationSettings", ())
+            .map_err(|e| format!("Could not open notification settings: {e}"))
     }
 
     async fn reconcile(app: &AppHandle) -> Result<(), String> {

@@ -20,6 +20,10 @@ root.innerHTML = `
       <p id="sync-badge" class="badge" role="status" aria-live="polite"></p>
     </header>
     <p id="status" role="status" aria-live="polite"></p>
+    <div id="notify-warning" class="warning" role="alert" hidden>
+      <p>Notifications are off, so reminders won’t appear.</p>
+      <button id="enable-notifications" class="primary" type="button">Turn on notifications</button>
+    </div>
     <section class="card" aria-labelledby="editor-heading">
       <h2 id="editor-heading">New task</h2>
       <form id="task-form">
@@ -40,7 +44,6 @@ root.innerHTML = `
     </section>
     <details class="card" id="settings">
       <summary><h2>Reminders and sync</h2></summary>
-      <button id="notifications" type="button">Enable notifications</button>
       <p class="hint">Sync runs after connecting, after edits, and every 30 seconds while the app is running.</p>
       <form id="sync-form">
         <label>API origin <input name="endpoint" type="url" value="https://api.astraeaoss.co.uk" required></label>
@@ -247,6 +250,10 @@ form.addEventListener('submit', event => {
       completed: editing ? data.records[editing]?.task?.completed ?? false : false, remindAt,
     } satisfies Task });
     resetEditor(); await refresh(); status('Task saved on this device.');
+    // Ask when it first matters; without permission Android drops the reminder silently.
+    if (remindAt !== null && !(await isPermissionGranted())) {
+      notifyWarning.hidden = await requestPermission() === 'granted';
+    }
   });
 });
 cancelEdit.addEventListener('click', resetEditor);
@@ -255,11 +262,15 @@ filter.addEventListener('change', render);
 $('#delivery-hint').textContent = /Android/i.test(navigator.userAgent)
   ? 'Reminders fire even when the app is closed.'
   : 'Reminders need the app running; closing the window keeps it in the tray.';
-const notificationsButton = $<HTMLButtonElement>('#notifications');
-notificationsButton.addEventListener('click', () => { void run(async () => {
-  const granted = await isPermissionGranted() || await requestPermission() === 'granted';
-  notificationsButton.hidden = granted;
-  status(granted ? 'Notifications enabled. Keep the app running for reminders.' : 'Notifications are blocked. Check system settings.');
+const notifyWarning = $<HTMLDivElement>('#notify-warning');
+async function checkNotifications() { notifyWarning.hidden = await isPermissionGranted(); }
+$('#enable-notifications').addEventListener('click', () => { void run(async () => {
+  if (await isPermissionGranted() || await requestPermission() === 'granted') {
+    notifyWarning.hidden = true; status('Notifications are on.'); return;
+  }
+  // After a refusal Android stops showing its prompt; only the app's settings page can help.
+  try { await invoke('open_notification_settings'); }
+  catch { status('Notifications are blocked. Turn them on for NothingToDo in system settings.'); }
 }); });
 syncForm.addEventListener('submit', event => {
   event.preventDefault();
@@ -286,16 +297,19 @@ async function start() {
     return;
   }
   await listen('tasks-changed', () => { void refresh().catch(error => status(String(error))); });
-  await listen<string>('reminder-error', event => status(`Could not save reminder receipt: ${event.payload}`));
+  await listen<string>('reminder-error', event => status(event.payload));
   await listen<SyncStatus>('sync-status', event => showSyncStatus(event.payload));
   showSyncStatus(await invoke<SyncStatus>('sync_status'));
-  notificationsButton.hidden = await isPermissionGranted();
+  await checkNotifications();
   if (!sync.connected) $<HTMLDetailsElement>('#settings').open = true;
   // Reconnection and foreground signals complement the native worker's periodic retry.
   window.addEventListener('online', () => { void wakeSync().catch(error => status(String(error))); });
   window.addEventListener('focus', syncOnReturn);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') syncOnReturn();
+    if (document.visibilityState !== 'visible') return;
+    syncOnReturn();
+    // The user may have changed the permission in system settings.
+    void checkNotifications();
   });
   await refresh();
   await wakeSync();
