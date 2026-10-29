@@ -25,7 +25,7 @@ root.innerHTML = `
         <h1 id="date-heading" class="dot"></h1>
         <p id="date-detail" class="label"></p>
       </div>
-      <p id="sync-badge" class="badge" role="status" aria-live="polite"></p>
+      <button id="sync-badge" class="badge" type="button" aria-label="Sync and backup settings" aria-live="polite"></button>
     </header>
     <div id="notify-warning" class="warning" role="alert" hidden>
       <p>Notifications are off, so reminders won’t appear.</p>
@@ -72,8 +72,11 @@ root.innerHTML = `
         </div>
       </form>
     </div>
-    <details class="card" id="settings">
-      <summary><h2>Reminders and sync</h2></summary>
+    <div id="settings" class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-heading" hidden>
+     <div class="panel">
+      <div class="panel-head"><h2 id="settings-heading" class="label">Settings</h2><button id="close-settings" class="icon" type="button" aria-label="Close">×</button></div>
+      <section>
+      <h3 class="label">Sync</h3>
       <p class="hint">Sync runs after connecting, after edits, and every 30 seconds while the app is running.</p>
       <form id="sync-form">
         <label>API origin <input name="endpoint" type="url" value="https://api.astraeaoss.co.uk" required></label>
@@ -87,9 +90,9 @@ root.innerHTML = `
       </div>
       <p id="sync-connection" role="status" aria-live="polite"></p>
       <p id="sync-notice" class="notice" role="status"></p>
-    </details>
-    <details class="card" id="backup">
-      <summary><h2>Backup</h2></summary>
+      </section>
+      <section>
+      <h3 class="label">Backup</h3>
       <p class="hint">Backups hold your tasks in plain text, without your sync token. Keep them private.</p>
       <div class="actions">
         <button id="export-backup" type="button">Export backup</button>
@@ -105,7 +108,9 @@ root.innerHTML = `
         </div>
         <p class="hint">Adding creates new copies, safe for another account. Replacing restores this profile as it was; the current data is saved first, and changes made elsewhere since the backup sync back in.</p>
       </div>
-    </details>
+      </section>
+     </div>
+    </div>
   </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
@@ -431,17 +436,24 @@ field('date').addEventListener('change', () => {
   if (value) chooseDay(startOfDay(new Date(`${value}T00:00`).getTime()));
 });
 sheet.addEventListener('click', event => { if (event.target === sheet) resetEditor(); });
+// Sync and backup live in a sheet opened from the sync label, out of the main view.
+const settings = $<HTMLDivElement>('#settings');
+const closeSettings = () => { settings.hidden = true; };
+$('#sync-badge').addEventListener('click', () => { settings.hidden = false; });
+$('#close-settings').addEventListener('click', closeSettings);
+settings.addEventListener('click', event => { if (event.target === settings) closeSettings(); });
 const search = $<HTMLInputElement>('#search');
 search.addEventListener('input', render);
 // Keyboard: n adds, / searches, Escape closes the sheet or clears the search.
 document.addEventListener('keydown', event => {
   const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement;
   if (event.key === 'Escape') {
-    if (!sheet.hidden) resetEditor();
+    if (!settings.hidden) closeSettings();
+    else if (!sheet.hidden) resetEditor();
     else if (search.value) { search.value = ''; render(); search.blur(); }
     return;
   }
-  if (typing || event.ctrlKey || event.metaKey || event.altKey || !sheet.hidden) return;
+  if (typing || event.ctrlKey || event.metaKey || event.altKey || !sheet.hidden || !settings.hidden) return;
   if (event.key === 'n') { event.preventDefault(); openSheet(null); }
   if (event.key === '/') { event.preventDefault(); search.focus(); }
 });
@@ -551,7 +563,6 @@ async function start() {
   await listen<SyncStatus>('sync-status', event => showSyncStatus(event.payload));
   showSyncStatus(await invoke<SyncStatus>('sync_status'));
   await checkNotifications();
-  if (!sync.connected) $<HTMLDetailsElement>('#settings').open = true;
   // Reconnection and foreground signals complement the native worker's periodic retry.
   window.addEventListener('online', () => { void wakeSync().catch(error => status(String(error))); });
   window.addEventListener('focus', syncOnReturn);
