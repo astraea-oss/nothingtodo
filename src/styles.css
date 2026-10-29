@@ -15,11 +15,13 @@
   :root { --bg: #000; --surface: #111; --surface2: #1a1a1a; --line: #2b2b2b; --fg: #fff; --dim: #8c8c8c; --faint: #4a4a4a; }
 }
 * { box-sizing: border-box; }
-body { margin: 0; }
+body { margin: 0; overflow: hidden; }
 button, input, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :focus-visible { outline: 1.5px solid var(--fg); outline-offset: 2px; }
-main { max-width: 40rem; margin: auto; min-height: 100vh; padding-bottom: calc(8.5rem + env(safe-area-inset-bottom)); }
+/* The header and strip stay put; only the timeline scrolls. */
+main { max-width: 40rem; margin: auto; height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
+.top, .strip { flex: none; }
 
 .lbl { font: 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
 .red { color: var(--red) !important; }
@@ -45,14 +47,16 @@ main { max-width: 40rem; margin: auto; min-height: 100vh; padding-bottom: calc(8
 .strip button.on .lbl { color: var(--bg); }
 
 /* Gutter list: bands, rows on a dotted rail, the NOW line */
-.gt { position: relative; min-height: calc(100vh - 14rem); } /* the rail runs down to the input bar, and the whole area takes sideways swipes */
-.gt::before { content: ''; position: absolute; left: 89px; top: 0; bottom: 0; border-left: 1.5px dotted var(--faint); }
+.gt { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(8.5rem + env(safe-area-inset-bottom));
+  /* the dotted rail, drawn over the whole scrolled length */
+  background-image: repeating-linear-gradient(to bottom, var(--faint) 0 1.5px, transparent 1.5px 4.5px); background-size: 1.5px 100%; background-position: 89px 0; background-repeat: no-repeat; background-attachment: local; }
 .gt-row, .gt-now { display: grid; grid-template-columns: 62px 22px 1fr 50px 16px; align-items: center; padding: 0 16px; }
 .gt-band { width: 100%; height: 28px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; border: 0; font: 10.5px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); background: var(--surface); position: relative; z-index: 2; }
 .gt-band.red { color: var(--red); }
 button.gt-band { cursor: pointer; text-align: left; }
 .gt-row { min-height: 44px; border-bottom: 1px dotted var(--line); font-size: 15px; position: relative; cursor: pointer; }
 .gt-row .tm { font: 12.5px var(--mono); }
+.gt-row .tm .d { display: block; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); margin-bottom: 1px; }
 .gt-row .tm.ad { font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); } /* deck: all-day markers */
 .gt-row .t { padding-left: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gt-row.open .t { white-space: normal; overflow-wrap: anywhere; padding-block: 10px; }
@@ -114,9 +118,9 @@ button.node::after { content: ''; position: absolute; inset: -14px; } /* a finge
 /* The add sheet (deck: B structure, B1 tiles, B2 instruments). Short shows .short-only, pulled up
    shows .full-only. */
 .add { position: relative; overflow-x: hidden; }
-.add.short { background-image: radial-gradient(var(--line) 1px, transparent 1.3px); background-size: 9px 9px; padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+.add.short { overflow: hidden; overscroll-behavior: contain; background-image: radial-gradient(var(--line) 1px, transparent 1.3px); background-size: 9px 9px; padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
 .add.short .full-only, .add.full .short-only { display: none; }
-.add.full { max-height: 94vh; }
+.add.full { max-height: 94vh; overscroll-behavior: contain; }
 .handle { display: block; width: 40px; height: 5px; padding: 0; margin: 0 auto 12px; border: 0; border-radius: 4px; background: var(--faint); }
 .handle::after { content: ''; display: block; margin: -14px -30px; height: 34px; } /* finger-sized */
 .add-head { display: flex; justify-content: space-between; align-items: center; min-height: 18px; }
@@ -168,8 +172,10 @@ button.node::after { content: ''; position: absolute; inset: -14px; } /* a finge
 .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
 .days button { aspect-ratio: 1; border: 0; border-radius: 50%; background: var(--bg); font: 12px var(--mono); color: var(--dim); }
 .days button.on { background: var(--fg); color: var(--bg); }
+.dial-wrap { display: flex; flex-direction: column; align-items: center; }
+.dial-note { margin: 2px 0 4px; text-align: center; }
 .dial { position: relative; width: min(240px, 70vw); aspect-ratio: 1; margin: 4px auto; display: flex; align-items: center; justify-content: center; touch-action: none; }
-.dial svg { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; }
+.dial svg { position: absolute; inset: 0; width: 100%; height: 100%; cursor: grab; touch-action: none; }
 .dial .c { text-align: center; pointer-events: none; }
 .dial .dot.big { font-size: 34px; }
 .track { display: flex; justify-content: space-between; align-items: center; }

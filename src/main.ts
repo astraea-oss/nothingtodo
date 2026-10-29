@@ -196,6 +196,9 @@ function countdown(due: number, now: number) {
 }
 
 let selectedDay = startOfDay(Date.now());
+// The first day the timeline lists; today unless an earlier day was picked.
+let listStart = startOfDay(Date.now());
+let scrollTo: number | null = null;
 let expanded: string | null = null;
 let showUnscheduled = false;
 type Entry = [string, TaskRecord];
@@ -268,13 +271,14 @@ function renderHeader(shownDay: number, preview: boolean) {
     cell.append(el('span', 'lbl', new Date(day).toLocaleDateString([], { weekday: 'narrow' })),
       el('b', new Date(day).getMonth() !== month ? 'dim' : '', two(new Date(day).getDate())), load);
     cell.dataset.day = String(day);
-    cell.addEventListener('click', () => { selectedDay = day; expanded = null; render(); });
+    cell.addEventListener('click', () => goToDay(day));
     strip.append(cell);
   }
 }
 
-function band(label: string, count: string, className = '', onClick?: () => void) {
+function band(label: string, count: string, className = '', onClick?: () => void, day?: number) {
   const b = el(onClick ? 'button' : 'div', `gt-band ${className}`);
+  if (day !== undefined) b.dataset.day = String(day);
   if (onClick) { (b as HTMLButtonElement).type = 'button'; b.addEventListener('click', onClick); }
   b.append(el('span', '', label), el('span', '', count));
   gutter.append(b);
@@ -313,11 +317,15 @@ function row(id: string, record: TaskRecord, now: number, showDay = false) {
   });
   const markedDay = markerDay(record);
   const time = marker && markedDay !== null ? (showDay ? shortDay(markedDay) : 'all day')
-    : due === null ? '—' : showDay ? `${weekday(due)} ${clock(due)}` : clock(due);
+    : due === null ? '—' : clock(due);
   const title = el('span', `t${done ? ' done' : ''}`, task?.title ?? (readOnly ? 'From a newer app version' : 'Deleted on this device'));
   // Sync glyphs: synced is silent, pending a ring, conflict a red dot.
   const sy = el('span', record.conflict ? 'sy c' : record.dirty && sync.connected ? 'sy p' : 'sy');
-  line.append(el('span', `tm${marker ? ' ad' : ''}${late ? ' red' : done ? ' dim' : ''}`, time), node, title,
+  const tm = el('span', `tm${marker ? ' ad' : ''}${late ? ' red' : done ? ' dim' : ''}`);
+  // Rows outside their own day band say which day: a small day label above the time.
+  if (showDay && !marker && due !== null) tm.append(el('span', 'd', shortDay(due)));
+  tm.append(document.createTextNode(time));
+  line.append(tm, node, title,
     el('span', `n${late ? ' red' : ''}`, done ? 'done' : due !== null ? countdown(due, now) : ''), sy);
   line.addEventListener('click', () => { if (lifted) return; expanded = expanded === id ? null : id; render(); });
   if (task && !readOnly && (task.remindAt !== null || marker)) holdToMove(line, id);
@@ -374,6 +382,7 @@ function render() {
   const shownDay = previewDay ?? selectedDay;
   renderHeader(shownDay, previewDay !== null);
 
+  const keep = gutter.scrollTop;
   gutter.replaceChildren();
   const now = Date.now();
   const today = startOfDay(now);
@@ -388,7 +397,7 @@ function render() {
     for (const [id, r] of attention) row(id, r, now, true);
   }
   const rest = entries.filter(e => !attention.includes(e) && e[1].task);
-  if (shownDay === today) {
+  if (Math.min(listStart, shownDay) >= today) {
     const overdue = rest.filter(([, r]) => !r.task!.completed && reminderAt(r) !== null && reminderAt(r)! < today);
     if (overdue.length) {
       const first = startOfDay(reminderAt(overdue[0][1])!);
@@ -397,34 +406,60 @@ function render() {
       for (const [id, r] of overdue) row(id, r, now, !same);
     }
   }
-  const next = addDays(shownDay, 1);
-  const dayEntries = rest.filter(([, r]) => { const d = reminderAt(r); return d !== null && d >= shownDay && d < next; });
-  // Markers sit at the top of their day as all-day rows.
-  const markers = rest.filter(([, r]) => markerDay(r) === shownDay);
-  // What Enter would add: a reminder at the typed time, otherwise a marker on the shown day.
+  // One continuous timeline from the first day shown: a band per day for the next two weeks,
+  // then a band per month. Days with nothing show only when picked in the strip, or today.
+  const first = Math.min(listStart, shownDay);
   const typing = !!parsed.title;
-  const adding = typing && (target === null || startOfDay(target) === shownDay);
-  const total = markers.length + dayEntries.length;
-  band(shownDay === today ? 'Today' : longDay(shownDay), adding ? `${total} + 1` : String(total));
+  const newDay = typing ? (target !== null ? startOfDay(target) : shownDay) : null;
+  const dayOf = (r: TaskRecord) => markerDay(r) ?? (reminderAt(r) !== null ? startOfDay(reminderAt(r)!) : null);
+  const byDay = new Map<number, Entry[]>();
+  for (const entry of rest) {
+    const day = dayOf(entry[1]);
+    if (day === null || day < first) continue;
+    byDay.set(day, [...(byDay.get(day) ?? []), entry]);
+  }
+  for (const day of [shownDay, today, newDay]) if (day !== null && day >= first && !byDay.has(day)) byDay.set(day, []);
+  const horizon = addDays(first, 14);
   const newRow = (marker: boolean) => {
     const line = el('div', 'gt-row new');
     line.append(el('span', `tm red${marker ? ' ad' : ''}`, marker ? 'all day' : clock(target!)), el('span', `node r${marker ? ' mk' : ''}`),
       el('span', 't', parsed.title), el('span', 'n red', 'new'), el('span'));
     gutter.append(line);
   };
-  if (adding && target === null) newRow(true);
-  for (const [id, r] of markers) row(id, r, now);
-  let drewNow = shownDay !== today;
-  let drewNew = !adding || target === null;
-  for (const [id, r] of dayEntries) {
-    const due = reminderAt(r)!;
-    if (!drewNew && target! <= due) { newRow(false); drewNew = true; }
-    if (!drewNow && now <= due) { nowLine(now); drewNow = true; }
-    row(id, r, now);
+  // Markers first, then timed rows in order.
+  const ordered = (list: Entry[]) => [...list].sort((a, b) =>
+    Number(markerDay(b[1]) !== null) - Number(markerDay(a[1]) !== null) || (reminderAt(a[1]) ?? 0) - (reminderAt(b[1]) ?? 0));
+  let month: number | null = null;
+  for (const day of [...byDay.keys()].sort((a, b) => a - b)) {
+    const list = ordered(byDay.get(day)!);
+    if (day >= horizon) {
+      const d = new Date(day), key = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+      if (key !== month) {
+        month = key;
+        const inMonth = [...byDay.entries()].filter(([k]) => k >= horizon && new Date(k).getMonth() === d.getMonth() && new Date(k).getFullYear() === d.getFullYear());
+        const label = d.toLocaleDateString([], { month: 'long', ...(d.getFullYear() !== new Date(today).getFullYear() ? { year: 'numeric' } : {}) });
+        band(label, String(inMonth.reduce((n, [, l]) => n + l.length, 0)), '', undefined, day);
+      }
+      if (newDay === day) newRow(target === null);
+      for (const [id, r] of list) row(id, r, now, true);
+      continue;
+    }
+    const adding = newDay === day;
+    band(day === today ? 'Today' : day === addDays(today, 1) ? `Tomorrow · ${longDay(day)}` : longDay(day),
+      adding ? `${list.length} + 1` : String(list.length), '', undefined, day);
+    if (adding && target === null) newRow(true);
+    let drewNow = day !== today;
+    let drewNew = !adding || target === null;
+    for (const [id, r] of list) {
+      const due = markerDay(r) === null ? reminderAt(r) : null;
+      if (due !== null && !drewNew && target! <= due) { newRow(false); drewNew = true; }
+      if (due !== null && !drewNow && now <= due) { nowLine(now); drewNow = true; }
+      row(id, r, now);
+    }
+    if (!drewNew) newRow(false);
+    if (!drewNow) nowLine(now);
+    if (!list.length && !adding && day !== today) gutter.append(el('p', 'gt-empty lbl', 'Nothing planned'));
   }
-  if (!drewNew) newRow(false);
-  if (!drewNow) nowLine(now);
-  if (!total && !adding && shownDay !== today) gutter.append(el('p', 'gt-empty lbl', 'Nothing planned'));
 
   // Reminders without a time, from before markers existed or saved from the sheet without one.
   const unscheduled = rest.filter(([, r]) => reminderAt(r) === null && markerDay(r) === null && !r.task!.completed);
@@ -435,6 +470,46 @@ function render() {
   $('#unscheduled').textContent = unscheduled.length ? `${unscheduled.length} unscheduled ${showUnscheduled ? '‹' : '›'}` : '';
   quick.placeholder = `New task for ${shortDay(selectedDay)}`;
   renderHint(parsed, target);
+  // Room after the last band, so any day can be scrolled to the top of the timeline.
+  const spacer = el('div', 'gt-end');
+  gutter.append(spacer);
+  const lastBand = [...gutter.querySelectorAll<HTMLElement>('.gt-band')].pop();
+  spacer.style.height = `${Math.max(0, gutter.clientHeight - (lastBand ? gutter.scrollHeight - lastBand.offsetTop : 0))}px`;
+  const goal = previewDay ?? scrollTo;
+  scrollTo = null;
+  const goalBand = goal !== null ? gutter.querySelector<HTMLElement>(`.gt-band[data-day="${goal}"]`) : null;
+  jumping = true;
+  gutter.scrollTop = goalBand ? goalBand.offsetTop : keep;
+  requestAnimationFrame(() => { jumping = false; });
+}
+// Set while the timeline scrolls itself, so the header keeps the day that was picked.
+let jumping = false;
+
+// The day shown in the header follows the band at the top of the timeline as it scrolls.
+gutter.addEventListener('scroll', () => {
+  if (jumping) return;
+  let top: number | null = null;
+  for (const b of gutter.querySelectorAll<HTMLElement>('.gt-band[data-day]')) {
+    // The timeline is the bands' offset parent, so offsetTop is already measured within it.
+    if (b.offsetTop <= gutter.scrollTop + 4) top = Number(b.dataset.day);
+    else break;
+  }
+  if (top !== null && top !== selectedDay && !quick.value.trim()) {
+    selectedDay = top;
+    renderHeader(top, false);
+    quick.placeholder = `New task for ${shortDay(selectedDay)}`;
+    renderHint();
+  }
+}, { passive: true });
+
+// Picking a day scrolls the timeline to it; days before the start extend it backwards.
+function goToDay(day: number) {
+  selectedDay = day;
+  if (day < listStart) listStart = day;
+  else if (day >= startOfDay(Date.now())) listStart = Math.min(listStart, startOfDay(Date.now()));
+  expanded = null;
+  scrollTo = day;
+  render();
 }
 
 function renderHint(parsed = parse(quick.value), target = quickTarget(parsed)) {
@@ -460,8 +535,7 @@ $<HTMLFormElement>('#quick').addEventListener('submit', event => {
     await save(null, remindAt !== null
       ? { schemaVersion: 1, title: parsed.title, notes: '', completed: false, remindAt }
       : { schemaVersion: 2, title: parsed.title, notes: '', completed: false, remindAt: null, kind: 'marker', date: isoDate(day) });
-    selectedDay = day;
-    render();
+    goToDay(day);
     await askForNotifications(remindAt);
   });
 });
@@ -506,7 +580,7 @@ document.addEventListener('pointerup', event => {
   if (day === null || !task) return;
   if (task.kind === 'marker') {
     if (task.date === isoDate(day)) return;
-    void run(async () => { await save(id, { ...task, date: isoDate(day) }); selectedDay = day; status(`Moved to ${longDay(day)}`); });
+    void run(async () => { await save(id, { ...task, date: isoDate(day) }); goToDay(day); status(`Moved to ${longDay(day)}`); });
     return;
   }
   if (task.remindAt === null) return;
@@ -515,7 +589,7 @@ document.addEventListener('pointerup', event => {
   if (to.getTime() === task.remindAt) return;
   void run(async () => {
     await save(id, { ...task, remindAt: to.getTime() });
-    selectedDay = day;
+    goToDay(day);
     status(`Moved to ${longDay(day)} · ${clock(to.getTime())}`);
   });
 });
@@ -527,7 +601,7 @@ gutter.addEventListener('touchend', event => {
   if (listX === null || lifted) { listX = null; return; }
   const dx = event.changedTouches[0].clientX - listX, dy = event.changedTouches[0].clientY - listY;
   listX = null;
-  if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy)) { selectedDay = addDays(selectedDay, dx < 0 ? 1 : -1); expanded = null; render(); }
+  if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy)) goToDay(addDays(selectedDay, dx < 0 ? 1 : -1));
 });
 
 // ── Strip navigation: swipe on touch, arrow keys on desktop ──
@@ -537,7 +611,7 @@ $<HTMLDivElement>('#strip').addEventListener('touchend', event => {
   if (swipeX === null) return;
   const dx = event.changedTouches[0].clientX - swipeX;
   swipeX = null;
-  if (Math.abs(dx) > 50) { selectedDay = addDays(selectedDay, dx < 0 ? 7 : -7); expanded = null; render(); }
+  if (Math.abs(dx) > 50) goToDay(addDays(selectedDay, dx < 0 ? 7 : -7));
 });
 
 // ── The add sheet: decided direction B (short sheet, pull up for more), B1 tiles, B2 instruments ──
@@ -613,40 +687,72 @@ function svg(tag: string, attrs: Record<string, string | number>) {
   return node;
 }
 
-// B2 instrument for When: a 24-hour dot dial. 48 half-hour dots, the quarters larger and
-// labelled; drag or tap anywhere on it to set the time in 5-minute steps.
+// B2 instrument for When: a 24-hour dot dial, midnight at the top and noon at the bottom, with
+// the daytime dots (06–18) brighter so the layout reads at a glance. Drag or tap anywhere on it
+// to set the time in 5-minute steps; dragging moves only the handle, and the sheet redraws when
+// the finger lifts.
 function dial() {
-  const wrap = el('div', 'dial');
+  const wrap = el('div', 'dial-wrap');
+  const face = el('div', 'dial');
   const s = svg('svg', { viewBox: '0 0 210 210' });
-  const c = 105, r = 92;
+  const c = 105, r = 88;
   for (let i = 0; i < 48; i++) {
-    const a = (i / 48) * 2 * Math.PI - Math.PI / 2, quarter = i % 12 === 0;
-    s.append(svg('circle', { cx: c + r * Math.cos(a), cy: c + r * Math.sin(a), r: quarter ? 2.6 : 1.6, fill: quarter ? 'var(--fg)' : 'var(--faint)' }));
+    const a = (i / 48) * 2 * Math.PI - Math.PI / 2, quarter = i % 12 === 0, day = i >= 12 && i <= 36;
+    s.append(svg('circle', { cx: c + r * Math.cos(a), cy: c + r * Math.sin(a), r: quarter ? 2.6 : day ? 1.9 : 1.5, fill: quarter ? 'var(--fg)' : day ? 'var(--dim)' : 'var(--faint)' }));
     if (quarter) {
-      const t = svg('text', { x: c + (r - 15) * Math.cos(a), y: c + (r - 15) * Math.sin(a) + 3, 'text-anchor': 'middle', 'font-family': 'Space Mono', 'font-size': 8, fill: 'var(--dim)' });
+      const t = svg('text', { x: c + (r - 21) * Math.cos(a), y: c + (r - 21) * Math.sin(a) + 3, 'text-anchor': 'middle', 'font-family': 'Space Mono', 'font-size': 8, fill: 'var(--dim)' });
       t.textContent = two(i / 2);
       s.append(t);
     }
   }
-  if (draft.minutes !== null) {
-    const a = (draft.minutes / 1440) * 2 * Math.PI - Math.PI / 2;
-    s.append(svg('line', { x1: c, y1: c, x2: c + r * Math.cos(a), y2: c + r * Math.sin(a), stroke: 'var(--fg)', 'stroke-width': 1.5, 'stroke-dasharray': '1 3', 'stroke-linecap': 'round' }));
-    s.append(svg('circle', { cx: c + r * Math.cos(a), cy: c + r * Math.sin(a), r: 7, fill: 'var(--fg)' }));
+  for (const [y, label] of [[8, 'MIDNIGHT'], [207, 'NOON']] as const) {
+    const t = svg('text', { x: c, y, 'text-anchor': 'middle', 'font-family': 'Space Mono', 'font-size': 7, 'letter-spacing': 1, fill: 'var(--dim)' });
+    t.textContent = label;
+    s.append(t);
   }
+  const line = svg('line', { x1: c, y1: c, stroke: 'var(--fg)', 'stroke-width': 1.5, 'stroke-dasharray': '1 3', 'stroke-linecap': 'round' });
+  const knob = svg('circle', { r: 7, fill: 'var(--fg)' });
+  s.append(line, knob);
+  const time = el('span', 'dot big');
+  const when = el('span', 'lbl');
   const centre = el('div', 'c');
-  centre.append(el('span', 'dot big', draft.minutes !== null ? `${two(Math.floor(draft.minutes / 60))}:${two(draft.minutes % 60)}` : '--:--'), el('br'),
-    el('span', 'lbl', `${shortDay(draft.day)}${draftTime() !== null ? ` · in ${countdown(draftTime()!, Date.now())}` : ''}`));
-  wrap.append(s, centre);
+  centre.append(time, el('br'), when);
+  const draw = () => {
+    const on = draft.minutes !== null;
+    line.style.display = knob.style.display = on ? '' : 'none';
+    if (on) {
+      const a = (draft.minutes! / 1440) * 2 * Math.PI - Math.PI / 2;
+      // The hand starts outside the centre readout so it never crosses the digits.
+      for (const [k, v] of [['x1', c + 0.62 * r * Math.cos(a)], ['y1', c + 0.62 * r * Math.sin(a)], ['x2', c + r * Math.cos(a)], ['y2', c + r * Math.sin(a)]] as const) line.setAttribute(k, String(v));
+      knob.setAttribute('cx', String(c + r * Math.cos(a)));
+      knob.setAttribute('cy', String(c + r * Math.sin(a)));
+    }
+    time.textContent = on ? `${two(Math.floor(draft.minutes! / 60))}:${two(draft.minutes! % 60)}` : '--:--';
+    when.textContent = `${shortDay(draft.day)}${draftTime() !== null ? ` · in ${countdown(draftTime()!, Date.now())}` : ''}`;
+    // Keep the When tile's own readout in step while dragging.
+    const tileTime = face.closest('.tl')?.querySelector<HTMLElement>('.row2 .dot.big');
+    if (tileTime) tileTime.textContent = time.textContent;
+  };
   const set = (event: PointerEvent) => {
     const box = s.getBoundingClientRect();
     const x = event.clientX - box.left - box.width / 2, y = event.clientY - box.top - box.height / 2;
     const turn = (Math.atan2(y, x) + Math.PI / 2 + 2 * Math.PI) % (2 * Math.PI);
     draft.minutes = (Math.round((turn / (2 * Math.PI)) * 1440 / 5) * 5) % 1440;
-    renderSheet();
+    draw();
   };
-  s.addEventListener('pointerdown', event => { s.setPointerCapture(event.pointerId); set(event); });
+  s.addEventListener('pointerdown', event => { event.preventDefault(); s.setPointerCapture(event.pointerId); set(event); });
   s.addEventListener('pointermove', event => { if (s.hasPointerCapture(event.pointerId)) set(event); });
-  s.addEventListener('pointerup', () => refreshPreview());
+  const finish = (event: PointerEvent) => {
+    if (!s.hasPointerCapture(event.pointerId)) return;
+    s.releasePointerCapture(event.pointerId);
+    renderSheet();
+    refreshPreview();
+  };
+  s.addEventListener('pointerup', finish);
+  s.addEventListener('pointercancel', finish);
+  face.append(s, centre);
+  wrap.append(face, el('p', 'unit dial-note', '24-hour dial · midnight at the top, noon at the bottom'));
+  draw();
   return wrap;
 }
 
@@ -912,24 +1018,27 @@ function openSheet(id: string | null) {
 }
 function resetEditor() { editing = null; sheet.hidden = true; openTile = null; pulled = false; }
 
-// Pull the sheet up for every field, down for the short form: drag the handle or tap it.
-function pullable(target: HTMLElement, up: boolean) {
-  let y: number | null = null;
-  target.addEventListener('touchstart', event => { y = event.touches[0].clientY; }, { passive: true });
-  target.addEventListener('touchend', event => {
-    if (y === null) return;
-    const dy = event.changedTouches[0].clientY - y;
-    y = null;
-    if (up ? dy < -30 : dy > 30) { pulled = up; openTile = null; renderSheet(); }
-  });
-}
+// Pull the sheet up for every field, down for the short form. The short sheet never scrolls, so
+// an upward drag anywhere on it pulls it up; pulled up, a downward drag from the top of the tiles
+// pulls it back down. Taps on the grip, the handle and "Pull down for less" do the same.
+let dragY: number | null = null, dragTop = 0;
+form.addEventListener('touchstart', event => { dragY = event.touches[0].clientY; dragTop = form.scrollTop; }, { passive: true });
+form.addEventListener('touchmove', event => {
+  // The dial and text fields handle their own touches.
+  if (!pulled && !(event.target as HTMLElement).closest('textarea')) event.preventDefault();
+}, { passive: false });
+form.addEventListener('touchend', event => {
+  if (dragY === null) return;
+  const dy = event.changedTouches[0].clientY - dragY;
+  dragY = null;
+  if ((event.target as HTMLElement).closest('.dial')) return;
+  if (!pulled && dy < -40) { pulled = true; openTile = null; renderSheet(); }
+  else if (pulled && dragTop <= 0 && form.scrollTop <= 0 && dy > 70) { pulled = false; openTile = null; renderSheet(); }
+});
 $('#pull-up').addEventListener('click', () => { pulled = true; renderSheet(); });
 $('#pull-down').addEventListener('click', () => { pulled = false; openTile = null; renderSheet(); });
 $('#sheet-handle').addEventListener('click', () => { pulled = !pulled; openTile = null; renderSheet(); });
 $('#readout').addEventListener('click', () => { pulled = true; openTile = 'when'; renderSheet(); });
-pullable($('#pull-up'), true);
-pullable($('#sheet-handle'), !pulled);
-pullable($('.add-head'), false);
 
 // Android's back gesture asks this first (MainActivity.kt): close what is open and return true,
 // or return false to let back leave the app.
@@ -951,9 +1060,9 @@ form.addEventListener('submit', event => {
     const task = draftTask();
     const wasNew = !editing;
     await save(editing, task);
-    selectedDay = draft.day;
     if (wasNew) quick.value = '';
-    resetEditor(); render();
+    resetEditor();
+    goToDay(draft.day);
     await askForNotifications(task.remindAt ?? (task.warnings?.length ? 1 : null));
   });
 });
@@ -1080,7 +1189,7 @@ document.addEventListener('keydown', event => {
   if (typing || event.ctrlKey || event.metaKey || event.altKey || !sheet.hidden || !settings.hidden) return;
   if (event.key === 'n') { event.preventDefault(); quick.focus(); }
   if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-    selectedDay = addDays(selectedDay, event.key === 'ArrowLeft' ? -1 : 1); expanded = null; render();
+    goToDay(addDays(selectedDay, event.key === 'ArrowLeft' ? -1 : 1));
   }
 });
 // Keep the NOW line and countdowns current.
