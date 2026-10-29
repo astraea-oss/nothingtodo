@@ -49,23 +49,16 @@ root.innerHTML = `
     </div>
     <div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
       <form id="task-form" class="panel add" novalidate>
-        <button type="button" id="sheet-handle" class="handle" aria-label="More fields"></button>
-        <div class="add-head">
-          <button type="button" id="pull-down" class="lbl full-only">↓ Pull down for less</button>
-          <span id="sheet-label" class="lbl short-only">New entry</span>
-          <span id="kind-label" class="lbl full-only"></span>
-        </div>
+        <button type="button" id="sheet-handle" class="handle" aria-label="Close"></button>
+        <span id="sheet-label" class="lbl">New entry</span>
         <input id="sheet-title" name="title" class="input" required maxlength="500" autocomplete="off" placeholder="What needs doing?" aria-label="Title">
-        <div class="short-only">
-          <div id="keys" class="keys" role="radiogroup" aria-label="Type"></div>
-          <button type="button" id="readout" class="readout" aria-label="Time"></button>
-          <div id="day-chips" class="chips" role="radiogroup" aria-label="Day"></div>
-          <button type="button" id="pull-up" class="grip"><i></i><span class="lbl">Pull up for more</span></button>
-        </div>
-        <div id="tiles" class="tiles full-only"></div>
-        <p id="delivery-hint" class="note full-only"></p>
+        <div id="keys" class="keys" role="radiogroup" aria-label="Type"></div>
+        <button type="button" id="readout" class="readout" aria-label="Time" aria-expanded="false"></button>
+        <div id="day-chips" class="chips" role="radiogroup" aria-label="Day"></div>
+        <div id="when-edit"></div>
+        <div id="tiles" class="tiles"></div>
+        <p id="delivery-hint" class="note"></p>
         <button class="btn f" type="submit"><span class="rdot"></span><span id="sheet-submit">Add reminder</span></button>
-        <div id="peek" class="peek short-only"></div>
         <input type="date" id="pick-date" class="pick" tabindex="-1" aria-hidden="true">
       </form>
     </div>
@@ -614,11 +607,11 @@ $<HTMLDivElement>('#strip').addEventListener('touchend', event => {
   if (Math.abs(dx) > 50) goToDay(addDays(selectedDay, dx < 0 ? 7 : -7));
 });
 
-// ── The add sheet: decided direction B (short sheet, pull up for more), B1 tiles, B2 instruments ──
+// ── The add sheet: one view (revised from the deck's B, 2026-10-29): the short sheet's top half, then
+// compact tiles that open in place (B1) with the B2 instruments inside. ──
 type Kind = 'reminder' | 'marker';
 interface Draft { kind: Kind; day: number; minutes: number | null; duration: number | null; repeat: Repeat | null; warnings: number[]; notes: string }
 let draft: Draft = { kind: 'reminder', day: startOfDay(Date.now()), minutes: null, duration: null, repeat: null, warnings: [], notes: '' };
-let pulled = false;
 let openTile: string | null = null;
 let preview: number[] = [];
 const titleInput = $<HTMLInputElement>('#sheet-title');
@@ -729,9 +722,9 @@ function dial() {
     }
     time.textContent = on ? `${two(Math.floor(draft.minutes! / 60))}:${two(draft.minutes! % 60)}` : '--:--';
     when.textContent = `${shortDay(draft.day)}${draftTime() !== null ? ` · in ${countdown(draftTime()!, Date.now())}` : ''}`;
-    // Keep the When tile's own readout in step while dragging.
-    const tileTime = face.closest('.tl')?.querySelector<HTMLElement>('.row2 .dot.big');
-    if (tileTime) tileTime.textContent = time.textContent;
+    // Keep the sheet's readout in step while dragging.
+    const readoutTime = document.querySelector<HTMLElement>('#readout .dot.big');
+    if (readoutTime) readoutTime.textContent = time.textContent;
   };
   const set = (event: PointerEvent) => {
     const box = s.getBoundingClientRect();
@@ -805,11 +798,11 @@ function repeatRing(r: Repeat | null) {
   return s;
 }
 
-const TILES = ['when', 'duration', 'repeat', 'warn', 'type', 'notes'] as const;
+const TILES = ['duration', 'repeat', 'warn', 'notes'] as const;
 type TileName = typeof TILES[number];
 function tile(name: TileName) {
   const open = openTile === name;
-  const t = el('div', `tl${name === 'when' || name === 'notes' || open ? ' w' : ''}${openTile && !open ? ' faded' : ''}${open ? ' open' : ''}`);
+  const t = el('div', `tl${open ? ' w open' : ''}${openTile && !open ? ' faded' : ''}`);
   t.setAttribute('role', 'button');
   t.tabIndex = 0;
   t.addEventListener('click', () => { if (!open) { openTile = name; renderSheet(); refreshPreview(); } });
@@ -821,29 +814,7 @@ function tile(name: TileName) {
     return g;
   };
   const marker = draft.kind === 'marker';
-  if (name === 'when') {
-    const time = draftTime();
-    const left = el('div');
-    left.append(el('span', 'lbl', 'When'), el('div', 'gap'), big(marker ? 'All day' : draft.minutes !== null ? clock(time!) : '--:--'));
-    const right = el('span', 'lbl right', `${longDay(draft.day)}${time !== null ? `\nin ${countdown(time, Date.now())}` : ''}`);
-    t.append(row2(left, right));
-    if (open) {
-      if (!marker) {
-        t.append(dial());
-        const now = draft.minutes ?? Math.ceil((new Date().getHours() * 60 + new Date().getMinutes()) / 30) * 30;
-        t.append(presets([
-          ['−30m', false, () => { draft.minutes = (now + 1410) % 1440; }],
-          ['07:00', draft.minutes === 420, () => { draft.minutes = 420; }],
-          ['09:00', draft.minutes === 540, () => { draft.minutes = 540; }],
-          ['12:00', draft.minutes === 720, () => { draft.minutes = 720; }],
-          ['18:00', draft.minutes === 1080, () => { draft.minutes = 1080; }],
-          ['+30m', false, () => { draft.minutes = (now + 30) % 1440; }],
-          ['No time', draft.minutes === null, () => { draft.minutes = null; draft.repeat = null; }],
-        ]));
-      }
-      t.append(dayChips());
-    }
-  } else if (name === 'duration') {
+  if (name === 'duration') {
     const [n, unit] = draft.duration ? durationText(draft.duration) : ['—', ''];
     t.append(el('span', 'lbl', 'Duration'), row2(big(n), el('span', 'unit', unit)));
     if (open) {
@@ -903,11 +874,6 @@ function tile(name: TileName) {
       }])));
       if (marker) t.append(el('p', 'unit', 'Counted back from 09:00 on the day'));
     }
-  } else if (name === 'type') {
-    const value = el('div', 'type-value');
-    value.append(el('i', `node${marker ? ' mk' : ''}`), el('span', '', marker ? 'Marker' : 'Reminder'));
-    t.append(el('span', 'lbl', 'Type'), value);
-    if (open) t.append(keys());
   } else {
     t.append(el('span', 'lbl', 'Notes'));
     if (open) {
@@ -926,6 +892,27 @@ function tile(name: TileName) {
     t.append(done);
   }
   return t;
+}
+
+// The When editor opens under the readout: the dial and time presets. Markers have no time.
+function whenEditor() {
+  const box = el('div', 'tl w open when');
+  const now = draft.minutes ?? Math.ceil((new Date().getHours() * 60 + new Date().getMinutes()) / 30) * 30;
+  const presets = el('div', 'pgrid');
+  for (const [label, on, action] of [
+    ['−30m', false, () => { draft.minutes = (now + 1410) % 1440; }],
+    ['07:00', draft.minutes === 420, () => { draft.minutes = 420; }],
+    ['09:00', draft.minutes === 540, () => { draft.minutes = 540; }],
+    ['12:00', draft.minutes === 720, () => { draft.minutes = 720; }],
+    ['18:00', draft.minutes === 1080, () => { draft.minutes = 1080; }],
+    ['+30m', false, () => { draft.minutes = (now + 30) % 1440; }],
+    ['No time', draft.minutes === null, () => { draft.minutes = null; draft.repeat = null; }],
+  ] as [string, boolean, () => void][]) presets.append(choice(label, on, action));
+  const done = el('button', 'pill', 'Done');
+  done.type = 'button';
+  done.addEventListener('click', event => { event.stopPropagation(); openTile = null; renderSheet(); });
+  box.append(dial(), presets, done);
+  return box;
 }
 
 function keys() {
@@ -966,28 +953,19 @@ $<HTMLInputElement>('#pick-date').addEventListener('change', event => {
 });
 
 function renderSheet() {
-  form.classList.toggle('full', pulled);
-  form.classList.toggle('short', !pulled);
   const marker = draft.kind === 'marker';
   $('#sheet-label').textContent = editing ? 'Edit entry' : 'New entry';
-  $('#kind-label').textContent = marker ? 'Marker' : 'Reminder';
   $('#keys').replaceWith(Object.assign(keys(), { id: 'keys' }));
   const time = draftTime();
   const readout = $<HTMLButtonElement>('#readout');
+  readout.classList.toggle('open', openTile === 'when');
+  readout.disabled = marker;
+  readout.setAttribute('aria-expanded', String(openTile === 'when'));
   readout.replaceChildren(el('span', 'dot big', marker ? 'All day' : time !== null ? clock(time) : '--:--'),
-    el('span', 'lbl right', `${shortDay(draft.day)}${time !== null ? `\nin ${countdown(time, Date.now())}` : ''}`));
+    el('span', 'lbl right', `${longDay(draft.day)}${time !== null ? `\nin ${countdown(time, Date.now())}` : marker ? '' : '\ntap to set a time'}`));
+  $('#when-edit').replaceChildren(...(openTile === 'when' && !marker ? [whenEditor()] : []));
   $('#day-chips').replaceWith(Object.assign(dayChips(), { id: 'day-chips' }));
-  const peek = $<HTMLDivElement>('#peek');
-  peek.replaceChildren();
-  for (const [name, label] of [['duration', 'Duration'], ['repeat', 'Repeat'], ['warn', 'Warn']] as const) {
-    const p = el('button', '', '');
-    p.type = 'button';
-    p.append(el('span', 'lbl', label));
-    p.addEventListener('click', () => { pulled = true; openTile = name; renderSheet(); refreshPreview(); });
-    peek.append(p);
-  }
-  const tiles = $<HTMLDivElement>('#tiles');
-  tiles.replaceChildren(...TILES.map(tile));
+  $<HTMLDivElement>('#tiles').replaceChildren(...TILES.map(tile));
   $('#sheet-submit').textContent = editing ? 'Save' : `Add ${marker ? 'marker' : 'reminder'}`;
 }
 
@@ -1009,43 +987,31 @@ function openSheet(id: string | null) {
     notes: task?.notes ?? '',
   };
   titleInput.value = task?.title ?? fromBar?.title ?? '';
-  pulled = false;
   openTile = null;
   renderSheet();
   refreshPreview();
   sheet.hidden = false;
   titleInput.focus();
 }
-function resetEditor() { editing = null; sheet.hidden = true; openTile = null; pulled = false; }
+function resetEditor() { editing = null; sheet.hidden = true; openTile = null; }
 
-// Pull the sheet up for every field, down for the short form. The short sheet never scrolls, so
-// an upward drag anywhere on it pulls it up; pulled up, a downward drag from the top of the tiles
-// pulls it back down. Taps on the grip, the handle and "Pull down for less" do the same.
-let dragY: number | null = null, dragTop = 0;
-form.addEventListener('touchstart', event => { dragY = event.touches[0].clientY; dragTop = form.scrollTop; }, { passive: true });
-form.addEventListener('touchmove', event => {
-  // The dial and text fields handle their own touches.
-  if (!pulled && !(event.target as HTMLElement).closest('textarea')) event.preventDefault();
-}, { passive: false });
+// Drag the sheet down from its top, or tap the handle, to close it.
+let dragY: number | null = null;
+form.addEventListener('touchstart', event => {
+  dragY = form.scrollTop <= 0 && event.touches[0].clientY - form.getBoundingClientRect().top < 90 ? event.touches[0].clientY : null;
+}, { passive: true });
 form.addEventListener('touchend', event => {
-  if (dragY === null) return;
-  const dy = event.changedTouches[0].clientY - dragY;
+  if (dragY !== null && event.changedTouches[0].clientY - dragY > 90) resetEditor();
   dragY = null;
-  if ((event.target as HTMLElement).closest('.dial')) return;
-  if (!pulled && dy < -40) { pulled = true; openTile = null; renderSheet(); }
-  else if (pulled && dragTop <= 0 && form.scrollTop <= 0 && dy > 70) { pulled = false; openTile = null; renderSheet(); }
 });
-$('#pull-up').addEventListener('click', () => { pulled = true; renderSheet(); });
-$('#pull-down').addEventListener('click', () => { pulled = false; openTile = null; renderSheet(); });
-$('#sheet-handle').addEventListener('click', () => { pulled = !pulled; openTile = null; renderSheet(); });
-$('#readout').addEventListener('click', () => { pulled = true; openTile = 'when'; renderSheet(); });
+$('#sheet-handle').addEventListener('click', resetEditor);
+$('#readout').addEventListener('click', () => { openTile = openTile === 'when' ? null : 'when'; renderSheet(); });
 
 // Android's back gesture asks this first (MainActivity.kt): close what is open and return true,
 // or return false to let back leave the app.
 (window as unknown as { nothingToDoBack: () => boolean }).nothingToDoBack = () => {
   if (!settings.hidden) { closeSettings(); return true; }
   if (!sheet.hidden && openTile) { openTile = null; renderSheet(); return true; }
-  if (!sheet.hidden && pulled) { pulled = false; renderSheet(); return true; }
   if (!sheet.hidden) { resetEditor(); return true; }
   if (quick.value) { quick.value = ''; quick.blur(); render(); return true; }
   if (expanded) { expanded = null; render(); return true; }
