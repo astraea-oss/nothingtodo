@@ -1,6 +1,7 @@
 //! Platform-independent task storage and Astraea Sync protocol.
 pub mod alarms;
 pub mod backup;
+pub mod entries;
 pub mod identity;
 pub mod migrations;
 pub mod schedule;

@@ -186,6 +186,8 @@ Acceptance: each feature has defined semantics, migration/backup coverage and mi
 
 ### 5a. Entry types, recurrence and warnings
 
+Current state (2026-10-29), first pass: the schema 2 model and occurrence engine are in `crates/core/src/entries.rs`, using `jiff` for time zones (the system tz database, including Android's). `Entry` holds kind, title, notes, completion, `when` (an instant, or local dates for markers), an IANA time zone, duration, one repeat rule and warnings. The engine implements the time semantics below and is tested for DST changes in both directions, skipped local times, month ends, leap days, weekday sets on daily and every-other-week repeats, stable occurrence indexes, warnings for occurrences just outside a window, and silent markers with "Day of" warnings. Writes are off (`WRITES_ENABLED = false`): this client already keeps schema 2 records read-only, and per the 0b rollout rule a release with that handling must be the published minimum client first. Not yet: storing and editing entries, migrating version 1 tasks, series completion and editing rules, feeding occurrences × warnings into the alarm list (the notification ID mapping must then key on task, occurrence and warning), the ringing alarm path (foreground service, full-screen intent, Linux audio) and the tile UI from 5b.
+
 Planned, not implemented. Designed on 2026-10-28 in `docs/design/ui-directions.html` (tabs 02 "Entry types" and 03 "Adding"). This milestone defines the recurrence and standalone-alarm work from milestone 5. It depends on the compatibility and rollout rules from 0b and the native execution foundation from 3a.
 
 **Entry model.** Each task gains a `kind`:
