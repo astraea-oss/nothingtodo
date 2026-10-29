@@ -96,8 +96,15 @@ async fn install(app: &AppHandle, client: Option<SyncClient>) {
     *sync = client.map(Arc::new);
 }
 
+/// Debug builds keep their own keyring entry, so a development run never picks up the sync login
+/// saved by an installed release build and syncs a real account into development data.
 fn keyring_service(app: &AppHandle) -> String {
-    app.config().identifier.clone()
+    let identifier = app.config().identifier.clone();
+    if cfg!(debug_assertions) {
+        format!("{identifier}.debug")
+    } else {
+        identifier
+    }
 }
 
 #[tauri::command]

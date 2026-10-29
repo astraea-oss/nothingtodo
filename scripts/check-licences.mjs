@@ -7,6 +7,8 @@ const ALLOWED = new Set([
   'MIT', 'MIT-0', 'Apache-2.0', 'Apache-2.0 WITH LLVM-exception', 'BSD-2-Clause', 'BSD-3-Clause',
   'ISC', 'Zlib', '0BSD', 'Unlicense', 'CC0-1.0', 'BSL-1.0', 'MPL-2.0', 'Unicode-3.0',
   'CDLA-Permissive-2.0', 'LGPL-2.1-or-later', 'GPL-3.0-or-later',
+  // Fonts only: bundled as separate data files with their licences in public/licenses.
+  'OFL-1.1',
 ]);
 
 // Minimal SPDX: OR picks any allowed side, AND needs every side, parentheses group.

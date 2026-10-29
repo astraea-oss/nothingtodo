@@ -242,6 +242,8 @@ Acceptance:
 
 ### 5b. Interface direction and adding entries
 
+Current state (2026-10-29), first pass implemented with today's fields: a dot-matrix date header and ISO week, a week strip of square day cells with load dots (previous/next week buttons; tapping a day starts the list there), and rows grouped under plain day headings (time, shape, title, time until) with Overdue first in red, a No time group, and a Needs attention group for conflicts and records from newer versions. Tapping a row expands it in place with its full date, notes, sync state and actions; the Upcoming/All/Done selector replaces the old filter. Add opens the short sheet: title, the three round type keys (only Reminder is active until 5a), the time in a dot readout, day chips (Today, Tomorrow, the next day, Pick) and More for notes; editing uses the same sheet. Doto, Space Grotesk and Space Mono are bundled from `@fontsource` with their OFL licences in `public/licenses`. Red now marks only overdue, conflicts, errors and the Add dot. Light and dark follow the system. Checked on the Android emulator and Linux. Not yet: the pulled-up tile sheet and instruments (they need the 5a fields), typed tokens, drag-to-reschedule onto the strip, swipe between days, and growing the strip into a month.
+
 Planned, not implemented. Agreed on 2026-10-28 from `docs/design/ui-directions.html`, which records the options considered and the "Decided" slide. Styling stays in `src/styles.css`. The adding fields depend on 5a; the list and strip can start earlier with today's reminders.
 
 **Visual language.** Follows Nothing's style: black and white, a dot-matrix font for numerals and headings, dot textures and dot instruments instead of icons.

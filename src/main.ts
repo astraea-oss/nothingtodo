@@ -1,3 +1,8 @@
+import '@fontsource/doto/700.css';
+import '@fontsource/doto/900.css';
+import '@fontsource/space-grotesk/400.css';
+import '@fontsource/space-grotesk/600.css';
+import '@fontsource/space-mono/400.css';
 import './styles.css';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -16,32 +21,56 @@ const root = document.querySelector<HTMLDivElement>('#app')!;
 root.innerHTML = `
   <main>
     <header class="app-header">
-      <div><h1>NothingToDo</h1><p class="tagline">Todos and reminders</p></div>
+      <div>
+        <h1 id="date-heading" class="dot"></h1>
+        <p id="date-detail" class="label"></p>
+      </div>
       <p id="sync-badge" class="badge" role="status" aria-live="polite"></p>
     </header>
-    <p id="status" role="status" aria-live="polite"></p>
     <div id="notify-warning" class="warning" role="alert" hidden>
       <p>Notifications are off, so reminders won’t appear.</p>
       <button id="enable-notifications" class="primary" type="button">Turn on notifications</button>
     </div>
-    <section class="card" aria-labelledby="editor-heading">
-      <h2 id="editor-heading">New task</h2>
+    <p id="status" role="status" aria-live="polite"></p>
+    <nav class="week" aria-label="Week">
+      <button id="week-back" class="icon" type="button" aria-label="Previous week">‹</button>
+      <div id="strip" class="strip"></div>
+      <button id="week-next" class="icon" type="button" aria-label="Next week">›</button>
+    </nav>
+    <div class="list-header">
+      <p id="list-label" class="label"></p>
+      <select id="filter" aria-label="Show"><option value="active">Upcoming</option><option value="all">All</option><option value="completed">Done</option></select>
+    </div>
+    <div id="tasks"></div>
+    <p id="empty" class="empty" hidden>Nothing here yet.</p>
+    <p id="sync-counts" class="hint"></p>
+    <button id="add" class="add" type="button"><span class="red-dot" aria-hidden="true"></span>Add</button>
+    <div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
       <form id="task-form">
-        <label>Title <input name="title" required maxlength="500" autocomplete="off" placeholder="What needs doing?"></label>
-        <label>Notes <textarea name="notes" maxlength="8000" rows="2"></textarea></label>
-        <label>Remind me <input name="remindAt" type="datetime-local"></label>
+        <div class="grip" aria-hidden="true"></div>
+        <input id="sheet-title" name="title" class="sheet-title" required maxlength="500" autocomplete="off" placeholder="What needs doing?" aria-label="Title">
+        <div class="keys" role="radiogroup" aria-label="Type">
+          <button type="button" class="key" disabled title="Alarms arrive with entry types"><i class="shape alarm"></i>Alarm</button>
+          <button type="button" class="key on" aria-pressed="true"><i class="shape reminder"></i>Reminder</button>
+          <button type="button" class="key" disabled title="Markers arrive with entry types"><i class="shape marker"></i>Marker</button>
+        </div>
+        <div class="readout">
+          <input name="time" type="time" class="dot" aria-label="Time">
+          <span id="readout-day" class="label"></span>
+        </div>
+        <div id="day-chips" class="chips" role="radiogroup" aria-label="Day"></div>
+        <input name="date" type="date" hidden aria-label="Date">
+        <button id="more" type="button" class="link" aria-expanded="false">More ▴</button>
+        <div id="more-fields" hidden>
+          <label>Notes <textarea name="notes" maxlength="8000" rows="3"></textarea></label>
+        </div>
         <p class="hint">Dates use this device’s timezone. <span id="delivery-hint"></span></p>
-        <div class="actions"><button class="primary" type="submit">Save task</button><button id="cancel-edit" type="button" hidden>Cancel edit</button></div>
+        <div class="actions">
+          <button class="primary" type="submit"><span class="red-dot" aria-hidden="true"></span><span id="sheet-submit">Add</span></button>
+          <button id="cancel-edit" type="button">Cancel</button>
+        </div>
       </form>
-    </section>
-    <section aria-labelledby="list-heading">
-      <div class="list-header">
-        <h2 id="list-heading">Tasks</h2>
-        <label class="inline">Show <select id="filter"><option value="active">Active</option><option value="all">All</option><option value="completed">Completed</option></select></label>
-      </div>
-      <ul id="tasks"></ul><p id="empty" class="empty" hidden>No tasks here yet.</p>
-      <p id="sync-counts" class="hint"></p>
-    </section>
+    </div>
     <details class="card" id="settings">
       <summary><h2>Reminders and sync</h2></summary>
       <p class="hint">Sync runs after connecting, after edits, and every 30 seconds while the app is running.</p>
@@ -70,7 +99,7 @@ root.innerHTML = `
         <p id="backup-summary"></p>
         <div class="actions">
           <button id="backup-copy" type="button">Add these tasks to this device</button>
-          <button id="backup-restore" class="danger" type="button">Replace this device’s tasks</button>
+          <button id="backup-restore" type="button">Replace this device’s tasks</button>
           <button id="backup-cancel" type="button">Cancel</button>
         </div>
         <p class="hint">Adding creates new copies, safe for another account. Replacing restores this profile as it was; the current data is saved first, and changes made elsewhere since the backup sync back in.</p>
@@ -81,7 +110,7 @@ root.innerHTML = `
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
 const form = $<HTMLFormElement>('#task-form');
 const syncForm = $<HTMLFormElement>('#sync-form');
-const list = $<HTMLUListElement>('#tasks');
+const list = $<HTMLDivElement>('#tasks');
 const filter = $<HTMLSelectElement>('#filter');
 const cancelEdit = $<HTMLButtonElement>('#cancel-edit');
 let data: Snapshot = { records: {}, cursor: 0, binding: null };
@@ -129,19 +158,15 @@ function syncOnReturn() {
 
 function status(message: string) { $('#status').textContent = message; }
 function field(name: string) { return form.elements.namedItem(name) as HTMLInputElement | HTMLTextAreaElement; }
-function resetEditor() {
-  editing = null; form.reset(); cancelEdit.hidden = true;
-  $('#editor-heading').textContent = 'New task';
-}
-function localDate(time: number | null) {
-  if (time === null) return '';
-  const date = new Date(time);
-  return new Date(time - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = '') {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (text) element.textContent = text;
+  return element;
 }
 function button(label: string, action: () => Promise<void> | void, className?: string) {
-  const element = document.createElement('button');
-  element.type = 'button'; element.textContent = label;
-  if (className) element.className = className;
+  const element = el('button', className, label);
+  element.type = 'button';
   element.addEventListener('click', () => { void run(action); });
   return element;
 }
@@ -173,110 +198,251 @@ function reminderAt(record: TaskRecord) {
   return remindAt !== null && snooze?.of === remindAt && snooze.until > remindAt ? snooze.until : remindAt;
 }
 
-// Active first, then soonest reminder, then title.
-function compare([, a]: [string, TaskRecord], [, b]: [string, TaskRecord]) {
-  const ta = a.task, tb = b.task;
-  if (!ta || !tb) return ta ? -1 : tb ? 1 : 0;
-  if (ta.completed !== tb.completed) return ta.completed ? 1 : -1;
-  const ra = reminderAt(a) ?? Infinity, rb = reminderAt(b) ?? Infinity;
-  return ra !== rb ? ra - rb : ta.title.localeCompare(tb.title);
+// ── Days. Local midnights, stepped with Date so DST changes do not shift them. ──
+function startOfDay(time: number) { const d = new Date(time); d.setHours(0, 0, 0, 0); return d.getTime(); }
+function addDays(day: number, count: number) { const d = new Date(day); d.setDate(d.getDate() + count); return d.getTime(); }
+function weekStart(day: number) { const d = new Date(day); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime(); }
+function isoWeek(day: number) {
+  const d = new Date(day); d.setDate(d.getDate() + 3 - (d.getDay() + 6) % 7);
+  const first = new Date(d.getFullYear(), 0, 4);
+  return 1 + Math.round(((d.getTime() - first.getTime()) / 86_400_000 - 3 + (first.getDay() + 6) % 7) / 7);
+}
+function dayName(day: number) {
+  const today = startOfDay(Date.now());
+  if (day === today) return 'Today';
+  if (day === addDays(today, 1)) return 'Tomorrow';
+  if (day === addDays(today, -1)) return 'Yesterday';
+  return new Date(day).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
+}
+// 24-hour, as in the design: fixed width, so rows line up.
+const clock = (time: number) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+function until(due: number, now: number) {
+  const minutes = Math.round((due - now) / 60_000);
+  if (minutes < 0) return 'late';
+  if (minutes < 1) return 'now';
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 48 * 60) return `${Math.round(minutes / 60)}h`;
+  return `${Math.round(minutes / 1440)}d`;
+}
+function isoDate(day: number) {
+  const d = new Date(day), p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+let selectedDay = startOfDay(Date.now());
+let expanded: string | null = null;
+type Entry = [string, TaskRecord];
+
+function renderHeader() {
+  const day = new Date(selectedDay);
+  $('#date-heading').textContent = `${day.toLocaleDateString([], { weekday: 'short' })} ${day.getDate()}`;
+  $('#date-detail').textContent = `${day.toLocaleDateString([], { month: 'short', year: 'numeric' })} · wk ${isoWeek(selectedDay)}`;
+  const strip = $<HTMLDivElement>('#strip');
+  strip.replaceChildren();
+  const today = startOfDay(Date.now());
+  const start = weekStart(selectedDay);
+  for (let i = 0; i < 7; i++) {
+    const day = addDays(start, i), next = addDays(day, 1);
+    const load = Object.values(data.records).filter(r => {
+      const due = reminderAt(r);
+      return r.task && !r.task.completed && due !== null && due >= day && due < next;
+    }).length;
+    const cell = el('button', 'day');
+    cell.type = 'button';
+    cell.classList.toggle('on', day === selectedDay);
+    cell.classList.toggle('today', day === today);
+    cell.setAttribute('aria-label', `${new Date(day).toDateString()}, ${load} reminder${load === 1 ? '' : 's'}`);
+    cell.setAttribute('aria-pressed', String(day === selectedDay));
+    cell.append(el('span', 'label', new Date(day).toLocaleDateString([], { weekday: 'narrow' })), el('b', 'dot', String(new Date(day).getDate())));
+    const dots = el('span', 'load');
+    for (let n = 0; n < Math.min(load, 4); n++) dots.append(el('i'));
+    cell.append(dots);
+    cell.addEventListener('click', () => { selectedDay = day; render(); });
+    strip.append(cell);
+  }
+}
+
+function row(id: string, record: TaskRecord, now: number) {
+  const task = record.task;
+  const readOnly = record.unsupported !== null;
+  const due = reminderAt(record);
+  const wrap = el('div', 'entry');
+  const line = el('div', 'row');
+  line.classList.toggle('done', !!task?.completed);
+  line.classList.toggle('overdue', !!task && !task.completed && due !== null && due <= now);
+  const tick = el('input', 'tick');
+  tick.type = 'checkbox'; tick.checked = !!task?.completed; tick.disabled = readOnly || !task;
+  tick.setAttribute('aria-label', task?.completed ? `Reopen ${task.title}` : `Complete ${task?.title ?? 'task'}`);
+  if (task) tick.addEventListener('change', () => { void run(() => save(id, { ...task, completed: tick.checked })); });
+  const title = el('button', 'title');
+  title.type = 'button';
+  title.setAttribute('aria-expanded', String(expanded === id));
+  title.append(el('span', '', task?.title ?? (readOnly ? 'A task from a newer version' : 'Deleted on this device')));
+  const firstLine = task?.notes.split('\n')[0];
+  if (firstLine && expanded !== id) title.append(el('span', 'sub', firstLine));
+  title.addEventListener('click', () => { expanded = expanded === id ? null : id; render(); });
+  const glyph = el('i', record.conflict ? 'glyph conflict' : record.dirty && sync.connected ? 'glyph pending' : 'glyph');
+  glyph.title = record.conflict ? 'Conflict' : record.dirty && sync.connected ? 'Not yet synced' : '';
+  line.append(tick, el('span', 'time', due !== null ? clock(due) : '—'), el('i', 'shape reminder'), title,
+    el('span', 'until', task?.completed ? 'done' : due !== null ? until(due, now) : ''), glyph);
+  wrap.append(line);
+  if (expanded === id || record.conflict) wrap.append(details(id, record, now));
+  return wrap;
+}
+
+function details(id: string, record: TaskRecord, now: number) {
+  const task = record.task;
+  const readOnly = record.unsupported !== null;
+  const due = reminderAt(record);
+  const box = el('div', 'details');
+  const meta = el('p', 'meta');
+  if (task?.remindAt != null) meta.append(el('span', '', `${new Date(task.remindAt).toLocaleDateString([], { dateStyle: 'full' })}, ${clock(task.remindAt)}`));
+  if (task && due !== null && due !== task.remindAt && !task.completed) meta.append(el('span', '', `Snoozed on this device until ${clock(due)}`));
+  if (record.dirty && sync.connected) meta.append(el('span', 'pending', 'Not yet synced'));
+  if (readOnly) meta.append(el('span', 'pending', 'Changed by a newer version of NothingToDo. Update the app to edit it.'));
+  if (meta.childElementCount) box.append(meta);
+  if (task?.notes) box.append(el('p', 'notes', task.notes));
+  if (task && !readOnly) {
+    const actions = el('div', 'actions');
+    actions.append(button('Edit', () => openSheet(id)));
+    // Only a reminder that has gone off can be snoozed; snoozing earlier would bring it forward.
+    if (!task.completed && due !== null && due <= now) actions.append(button('Snooze 10 min', async () => { await invoke('snooze_task', { id, minutes: 10 }); await refresh(); }));
+    actions.append(button('Delete', async () => { await invoke('delete_task', { id }); expanded = null; await refresh(); }, 'quiet'));
+    box.append(actions);
+  }
+  if (record.conflict) {
+    const conflict = el('div', 'conflict');
+    const remote = record.conflict.value;
+    conflict.append(el('p', '', `Changed on another device. Server version: ${record.conflict.deleted || !remote ? 'deleted' : `“${remote.title}”${remote.completed ? ' (completed)' : ''}`}. Choose which to keep.`));
+    const actions = el('div', 'actions');
+    actions.append(button('Keep this device’s version', async () => {
+      await invoke('resolve_conflict', { id, keepLocal: true }); await refresh();
+    }, 'primary'), button('Use server version', async () => {
+      await invoke('resolve_conflict', { id, keepLocal: false }); await refresh();
+    }));
+    conflict.append(actions);
+    box.append(conflict);
+  }
+  return box;
+}
+
+function group(label: string, entries: Entry[], now: number, options: { id?: string; className?: string; empty?: string } = {}) {
+  const section = el('section', `group ${options.className ?? ''}`);
+  if (options.id) section.id = options.id;
+  section.append(el('h2', 'day-heading', label));
+  for (const [id, record] of entries) section.append(row(id, record, now));
+  if (!entries.length && options.empty) section.append(el('p', 'nothing', options.empty));
+  list.append(section);
 }
 
 function render() {
+  renderHeader();
   list.replaceChildren();
   const now = Date.now();
-  for (const [id, record] of Object.entries(data.records).sort(compare)) {
-    const task = record.task;
-    const readOnly = record.unsupported !== null;
-    if (!record.conflict && !readOnly && (!task || (filter.value === 'active' && task.completed) || (filter.value === 'completed' && !task.completed))) continue;
-    const li = document.createElement('li');
-    li.className = 'task';
-    if (task) {
-      li.classList.toggle('done', task.completed);
-      const head = document.createElement('div'); head.className = 'task-head';
-      const check = document.createElement('input');
-      check.type = 'checkbox'; check.checked = task.completed; check.disabled = readOnly;
-      check.setAttribute('aria-label', task.completed ? `Reopen ${task.title}` : `Complete ${task.title}`);
-      check.addEventListener('change', () => { void run(() => save(id, { ...task, completed: check.checked })); });
-      const title = document.createElement('h3'); title.textContent = task.title;
-      head.append(check, title);
-      li.append(head);
-      const meta = document.createElement('p'); meta.className = 'meta';
-      const due = reminderAt(record);
-      if (task.remindAt !== null && due !== null) {
-        const reminder = document.createElement('span');
-        reminder.className = !task.completed && due <= now ? 'reminder overdue' : 'reminder';
-        reminder.textContent = `⏰ ${new Date(task.remindAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}`;
-        meta.append(reminder);
-        if (due !== task.remindAt && !task.completed) {
-          const snoozed = document.createElement('span');
-          snoozed.textContent = `Snoozed on this device until ${new Date(due).toLocaleTimeString([], { timeStyle: 'short' })}`;
-          meta.append(snoozed);
-        }
-      }
-      if (record.dirty && sync.connected) {
-        const pending = document.createElement('span'); pending.className = 'pending';
-        pending.textContent = 'Not yet synced'; meta.append(pending);
-      }
-      if (readOnly) {
-        const note = document.createElement('span'); note.className = 'pending';
-        note.textContent = 'Changed by a newer version of NothingToDo. Update the app to edit it.';
-        meta.append(note);
-      }
-      if (meta.childElementCount) li.append(meta);
-      if (task.notes) { const notes = document.createElement('p'); notes.className = 'notes'; notes.textContent = task.notes; li.append(notes); }
-      const actions = document.createElement('div'); actions.className = 'actions';
-      actions.append(button('Edit', () => {
-        editing = id; field('title').value = task.title; field('notes').value = task.notes;
-        field('remindAt').value = localDate(task.remindAt); cancelEdit.hidden = false;
-        $('#editor-heading').textContent = 'Edit task'; field('title').focus();
-        form.scrollIntoView({ behavior: 'smooth' });
-      }));
-      // Only a reminder that has gone off can be snoozed; snoozing earlier would bring it forward.
-      if (!task.completed && due !== null && due <= now) actions.append(button('Snooze 10 min', async () => { await invoke('snooze_task', { id, minutes: 10 }); await refresh(); }));
-      actions.append(button('Delete', async () => {
-        await invoke('delete_task', { id }); if (editing === id) resetEditor(); await refresh();
-      }, 'danger'));
-      if (!readOnly) li.append(actions);
-    } else if (readOnly) {
-      const label = document.createElement('h3'); label.textContent = 'A task from a newer version of NothingToDo'; li.append(label);
-      const note = document.createElement('p'); note.className = 'meta pending'; note.textContent = 'Update the app to see and edit it.'; li.append(note);
-    } else {
-      const label = document.createElement('h3'); label.textContent = 'Deleted on this device'; li.append(label);
-    }
-    if (record.conflict) {
-      const conflict = document.createElement('div'); conflict.className = 'conflict';
-      const message = document.createElement('p');
-      const remote = record.conflict.value;
-      message.textContent = `This task was changed on another device. Server version: ${record.conflict.deleted || !remote ? 'deleted' : `“${remote.title}”${remote.completed ? ' (completed)' : ''}`}. Choose which version to keep.`;
-      const details = document.createElement('pre'); details.textContent = JSON.stringify(remote, null, 2);
-      const actions = document.createElement('div'); actions.className = 'actions';
-      actions.append(button('Keep this device’s version', async () => {
-        await invoke('resolve_conflict', { id, keepLocal: true }); await refresh();
-      }, 'primary'), button('Use server version', async () => {
-        await invoke('resolve_conflict', { id, keepLocal: false }); if (editing === id) resetEditor(); await refresh();
-      }));
-      conflict.append(message, details, actions);
-      li.append(conflict);
-    }
-    list.append(li);
+  const view = filter.value;
+  const byTime = (a: Entry, b: Entry) => (reminderAt(a[1]) ?? Infinity) - (reminderAt(b[1]) ?? Infinity) || (a[1].task?.title ?? '').localeCompare(b[1].task?.title ?? '');
+  const entries = (Object.entries(data.records) as Entry[]).sort(byTime);
+  // Conflicts and records from newer versions always show, whatever the filter.
+  const attention = entries.filter(([, r]) => r.conflict || (r.unsupported && !r.task));
+  const shown = entries.filter(e => !attention.includes(e) && e[1].task &&
+    (view === 'all' || (view === 'completed') === e[1].task.completed));
+  if (attention.length) group('Needs attention', attention, now, { className: 'attention' });
+  if (view === 'active') {
+    const overdue = shown.filter(e => reminderAt(e[1])! <= now && reminderAt(e[1]) !== null);
+    if (overdue.length) group('Overdue', overdue, now, { className: 'late' });
   }
-  $<HTMLElement>('#empty').hidden = list.children.length > 0;
+  const timed = shown.filter(e => reminderAt(e[1]) !== null && (view !== 'active' || reminderAt(e[1])! > now));
+  const days = new Map<number, Entry[]>();
+  for (const entry of timed) {
+    const day = startOfDay(reminderAt(entry[1])!);
+    if (view === 'active' && day < selectedDay) continue;
+    days.set(day, [...(days.get(day) ?? []), entry]);
+  }
+  if (view === 'active' && !days.has(selectedDay)) days.set(selectedDay, []);
+  for (const day of [...days.keys()].sort((a, b) => a - b)) {
+    group(dayName(day), days.get(day)!, now, { id: `day-${day}`, className: day === selectedDay ? 'selected' : '', empty: 'Nothing planned.' });
+  }
+  const untimed = shown.filter(e => reminderAt(e[1]) === null);
+  if (untimed.length) group('No time', untimed, now);
+  $('#list-label').textContent = view === 'active' ? `From ${dayName(selectedDay).toLowerCase()}` : view === 'all' ? 'Everything' : 'Done';
+  $<HTMLElement>('#empty').hidden = entries.some(e => e[1].task || e[1].conflict || e[1].unsupported);
   const records = Object.values(data.records);
   const pending = records.filter(r => r.dirty).length, conflicts = records.filter(r => r.conflict).length;
   $('#sync-counts').textContent = sync.connected && (pending || conflicts) ? `${pending} not yet synced · ${conflicts} conflicts` : '';
 }
 
+// ── The add sheet ──
+const sheet = $<HTMLDivElement>('#sheet');
+function chooseDay(day: number) {
+  field('date').value = isoDate(day);
+  $('#readout-day').textContent = dayName(day);
+  const pick = field('date') as HTMLInputElement;
+  for (const chip of $<HTMLDivElement>('#day-chips').children) {
+    chip.setAttribute('aria-pressed', String((chip as HTMLElement).dataset.day === String(day)));
+  }
+  pick.hidden = [...$<HTMLDivElement>('#day-chips').children].some(c => (c as HTMLElement).dataset.day === String(day));
+}
+function renderChips() {
+  const chips = $<HTMLDivElement>('#day-chips');
+  chips.replaceChildren();
+  const today = startOfDay(Date.now());
+  for (const day of [today, addDays(today, 1), addDays(today, 2)]) {
+    const chip = el('button', 'chip', day === addDays(today, 2) ? new Date(day).toLocaleDateString([], { weekday: 'short' }) : dayName(day));
+    chip.type = 'button'; chip.dataset.day = String(day);
+    chip.addEventListener('click', () => chooseDay(day));
+    chips.append(chip);
+  }
+  const pick = el('button', 'chip', 'Pick…');
+  pick.type = 'button';
+  pick.addEventListener('click', () => { const input = field('date') as HTMLInputElement; input.hidden = false; input.showPicker?.(); input.focus(); });
+  chips.append(pick);
+}
+function openSheet(id: string | null) {
+  editing = id;
+  form.reset();
+  renderChips();
+  const task = id ? data.records[id]?.task : null;
+  const at = task?.remindAt ?? null;
+  field('title').value = task?.title ?? '';
+  field('notes').value = task?.notes ?? '';
+  field('time').value = at !== null ? new Date(at).toTimeString().slice(0, 5) : '';
+  chooseDay(at !== null ? startOfDay(at) : Math.max(selectedDay, startOfDay(Date.now())));
+  const more = !!task?.notes;
+  $<HTMLElement>('#more-fields').hidden = !more;
+  $('#more').setAttribute('aria-expanded', String(more));
+  $('#sheet-submit').textContent = id ? 'Save' : 'Add';
+  sheet.hidden = false;
+  field('title').focus();
+}
+function resetEditor() { editing = null; form.reset(); sheet.hidden = true; }
+$('#add').addEventListener('click', () => openSheet(null));
+$('#more').addEventListener('click', () => {
+  const fields = $<HTMLElement>('#more-fields');
+  fields.hidden = !fields.hidden;
+  $('#more').setAttribute('aria-expanded', String(!fields.hidden));
+});
+field('date').addEventListener('change', () => {
+  const value = field('date').value;
+  if (value) chooseDay(startOfDay(new Date(`${value}T00:00`).getTime()));
+});
+sheet.addEventListener('click', event => { if (event.target === sheet) resetEditor(); });
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && !sheet.hidden) resetEditor(); });
+$('#week-back').addEventListener('click', () => { selectedDay = addDays(selectedDay, -7); render(); });
+$('#week-next').addEventListener('click', () => { selectedDay = addDays(selectedDay, 7); render(); });
+
 form.addEventListener('submit', event => {
   event.preventDefault();
   void run(async () => {
-    const remindAt = field('remindAt').value ? new Date(field('remindAt').value).getTime() : null;
-    if (remindAt !== null && !Number.isFinite(remindAt)) throw new Error('Enter a valid reminder date.');
+    const time = field('time').value, date = field('date').value;
+    const remindAt = time ? new Date(`${date}T${time}`).getTime() : null;
+    if (remindAt !== null && !Number.isFinite(remindAt)) throw new Error('Enter a valid date and time.');
+    const existing = editing ? data.records[editing]?.task : null;
     await invoke('save_task', { id: editing, task: {
-      schemaVersion: 1, title: field('title').value, notes: field('notes').value,
-      completed: editing ? data.records[editing]?.task?.completed ?? false : false, remindAt,
+      ...existing, schemaVersion: 1, title: field('title').value, notes: field('notes').value,
+      completed: existing?.completed ?? false, remindAt,
     } satisfies Task });
-    resetEditor(); await refresh(); status('Task saved on this device.');
+    if (remindAt !== null) selectedDay = Math.max(startOfDay(Date.now()), startOfDay(remindAt));
+    resetEditor(); await refresh(); status('Saved on this device.');
     // Ask when it first matters; without permission Android drops the reminder silently.
     if (remindAt !== null && !(await isPermissionGranted())) {
       notifyWarning.hidden = await requestPermission() === 'granted';
