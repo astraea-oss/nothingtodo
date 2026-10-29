@@ -61,6 +61,7 @@ root.innerHTML = `
         <div id="when-edit"></div>
         <div id="tiles" class="tiles"></div>
         <p id="delivery-hint" class="note"></p>
+        <button id="save-one" class="btn" type="button" hidden>This one only</button>
         <button class="btn f" type="submit"><span class="rdot"></span><span id="sheet-submit">Add reminder</span></button>
         <input type="date" id="pick-date" class="pick" tabindex="-1" aria-hidden="true">
       </form>
@@ -519,10 +520,16 @@ function details(id: string, record: TaskRecord, now: number) {
     // Only a reminder that has gone off can be snoozed; snoozing earlier would bring it forward.
     if (!task.completed && due !== null && due <= now) actions.append(pill('Snooze 10m', async () => { await invoke('snooze_task', { id, minutes: 10 }); await refresh(); }));
     if (task.repeat) {
+      // Skipping moves the series on without marking anything done.
+      actions.append(pill('Skip this one', async () => {
+        await save(id, { ...task, completed: true });
+        const next = data.records[id]?.task;
+        status(`Skipped · next ${next?.remindAt != null ? `${shortDay(next.remindAt)} · ${clock(next.remindAt)}` : next?.date ? shortDay(new Date(`${next.date}T00:00`).getTime()) : ''}`);
+      }));
       const { repeat: _r, repeatFrom: _f, ...single } = task;
       actions.append(pill('End repeat', () => save(id, single)));
     }
-    actions.append(pill('Delete', async () => { await invoke('delete_task', { id }); expanded = null; await refresh(); }));
+    actions.append(pill(task.repeat ? 'Delete all' : 'Delete', async () => { await invoke('delete_task', { id }); expanded = null; await refresh(); }));
     box.append(actions);
   }
   if (record.conflict) {
@@ -1179,7 +1186,10 @@ function renderSheet() {
   $('#when-edit').replaceChildren(...(openTile === 'when' && !marker ? [whenEditor()] : []));
   $('#day-chips').replaceWith(Object.assign(dayChips(), { id: 'day-chips' }));
   $<HTMLDivElement>('#tiles').replaceChildren(...TILES.map(tile));
-  $('#sheet-submit').textContent = editing ? 'Save' : `Add ${draft.kind}`;
+  // Editing a repeating task can change just this occurrence or the whole series.
+  const series = !!(editing && data.records[editing]?.task?.repeat);
+  $<HTMLButtonElement>('#save-one').hidden = !series;
+  $('#sheet-submit').textContent = series ? 'Save all' : editing ? 'Save' : `Add ${draft.kind}`;
   // Desktop alarms ring from the running app only; say so where it matters.
   $('#delivery-hint').textContent = deliveryHint + (draft.kind === 'alarm' && !android ? ' Alarms ring only while NothingToDo is running.' : '');
 }
@@ -1236,6 +1246,22 @@ $('#readout').addEventListener('click', () => { openTile = openTile === 'when' ?
 };
 $('#open-sheet').addEventListener('click', () => openSheet(null));
 sheet.addEventListener('click', event => { if (event.target === sheet) resetEditor(); });
+// "This one only": the edits become a one-off for this occurrence, and the series moves on to
+// its next one. Both are ordinary synced edits.
+$('#save-one').addEventListener('click', () => { void run(async () => {
+  const id = editing, stored = id ? data.records[id]?.task : null;
+  if (!id || !stored?.repeat) return;
+  if (!titleInput.value.trim()) { titleInput.focus(); return; }
+  const { repeat: _r, repeatFrom: _f, ...one } = draftTask();
+  editing = null;
+  await save(null, one);
+  await save(id, { ...stored, completed: true });
+  resetEditor();
+  goToDay(draft.day);
+  const next = data.records[id]?.task;
+  status(`Changed this one · the series continues ${next?.remindAt != null ? `${shortDay(next.remindAt)} · ${clock(next.remindAt)}` : next?.date ? shortDay(new Date(`${next.date}T00:00`).getTime()) : ''}`);
+}); });
+
 form.addEventListener('submit', event => {
   event.preventDefault();
   void run(async () => {

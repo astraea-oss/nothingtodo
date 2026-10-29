@@ -143,6 +143,8 @@ button.node::after { content: ''; position: absolute; inset: -14px; } /* a finge
 .chips .pill.on { background: var(--fg); color: var(--bg); border-color: var(--fg); }
 .btn { width: 100%; height: 48px; border-radius: 99px; display: flex; align-items: center; justify-content: center; font: 700 12.5px var(--mono); letter-spacing: .14em; text-transform: uppercase; border: 1px solid var(--fg); background: none; color: var(--fg); }
 .btn.f { background: var(--fg); color: var(--bg); }
+.btn + .btn { margin-top: 8px; }
+.btn[hidden] { display: none; }
 .rdot { width: 8px; height: 8px; border-radius: 50%; background: var(--red); display: inline-block; margin-right: 10px; }
 .pick { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
