@@ -7,8 +7,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.ContentValues
 import android.content.Intent
 import android.net.Uri
+import android.os.Environment
+import android.provider.MediaStore
 import android.os.Build
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
@@ -269,6 +272,12 @@ class ScheduleArgs {
 }
 
 @InvokeArg
+class SaveArgs {
+  var name: String = ""
+  var text: String = ""
+}
+
+@InvokeArg
 class AcknowledgeArgs {
   var keys: List<String> = emptyList()
 }
@@ -295,6 +304,32 @@ class ReminderPlugin(private val activity: Activity) : Plugin(activity) {
     val args = invoke.parseArgs(AcknowledgeArgs::class.java)
     Reminders.acknowledge(activity.applicationContext, args.keys.toSet())
     invoke.resolve()
+  }
+
+  /** Saves a backup where the user can find it: Downloads on Android 10+, no permission needed. */
+  @Command
+  fun saveToDownloads(invoke: Invoke) {
+    val args = invoke.parseArgs(SaveArgs::class.java)
+    val context = activity.applicationContext
+    val location = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, args.name)
+        put(MediaStore.Downloads.MIME_TYPE, "application/json")
+      }
+      val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+      if (uri == null) {
+        invoke.reject("Could not create the file in Downloads.")
+        return
+      }
+      context.contentResolver.openOutputStream(uri)?.use { it.write(args.text.toByteArray()) }
+      "Downloads/${args.name}"
+    } else {
+      val folder = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+      val file = File(folder, args.name)
+      file.writeText(args.text)
+      file.path
+    }
+    invoke.resolve(JSObject().put("location", location))
   }
 
   /** Android stops showing the permission prompt after a refusal; settings can still allow it. */

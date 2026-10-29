@@ -431,6 +431,15 @@ fn reconcile_identical(state: &mut Snapshot) {
 }
 
 #[cfg(test)]
+pub(crate) mod tests_support {
+    use crate::{Remote, Store};
+
+    pub fn apply_remote(store: &mut Store, remote: Remote) {
+        super::apply(&mut store.state, remote).unwrap();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::Task;

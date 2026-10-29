@@ -29,7 +29,7 @@ fn report(app: &AppHandle, error: String) {
 }
 
 #[cfg(target_os = "android")]
-pub use android::{open_notification_settings, plugin, run};
+pub use android::{open_notification_settings, plugin, run, save_to_downloads};
 
 #[cfg(not(target_os = "android"))]
 pub fn open_notification_settings(_: &AppHandle) -> Result<(), String> {
@@ -48,7 +48,7 @@ mod android {
 
     /// `ReminderPlugin` in the Android project (`Reminders.kt`): saves the list, cancels alarms
     /// that dropped off it and arms the rest. Its receivers post the notification and re-arm after
-    /// a reboot without the app running.
+    /// a reboot without the app running. It also hosts the app's other small Android helpers.
     struct Scheduler(PluginHandle<Wry>);
 
     pub fn plugin() -> TauriPlugin<Wry> {
@@ -76,6 +76,18 @@ mod android {
                 attempt += 1;
             }
         }
+    }
+
+    pub fn save_to_downloads(app: &AppHandle, name: &str, text: &str) -> Result<String, String> {
+        #[derive(serde::Deserialize)]
+        struct Saved {
+            location: String,
+        }
+        app.state::<Scheduler>()
+            .0
+            .run_mobile_plugin::<Saved>("saveToDownloads", json!({ "name": name, "text": text }))
+            .map(|saved| saved.location)
+            .map_err(|e| format!("Could not save the backup: {e}"))
     }
 
     pub fn open_notification_settings(app: &AppHandle) -> Result<(), String> {

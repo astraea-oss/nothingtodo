@@ -58,6 +58,24 @@ root.innerHTML = `
       <p id="sync-connection" role="status" aria-live="polite"></p>
       <p id="sync-notice" class="notice" role="status"></p>
     </details>
+    <details class="card" id="backup">
+      <summary><h2>Backup</h2></summary>
+      <p class="hint">Backups hold your tasks in plain text, without your sync token. Keep them private.</p>
+      <div class="actions">
+        <button id="export-backup" type="button">Export backup</button>
+        <button id="choose-backup" type="button">Use a backup file…</button>
+        <input id="backup-file" type="file" accept=".json,application/json" hidden>
+      </div>
+      <div id="backup-choice" class="conflict" hidden>
+        <p id="backup-summary"></p>
+        <div class="actions">
+          <button id="backup-copy" type="button">Add these tasks to this device</button>
+          <button id="backup-restore" class="danger" type="button">Replace this device’s tasks</button>
+          <button id="backup-cancel" type="button">Cancel</button>
+        </div>
+        <p class="hint">Adding creates new copies, safe for another account. Replacing restores this profile as it was; the current data is saved first, and changes made elsewhere since the backup sync back in.</p>
+      </div>
+    </details>
   </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
@@ -281,6 +299,45 @@ $('#enable-notifications').addEventListener('click', () => { void run(async () =
   try { await invoke('open_notification_settings'); }
   catch { status('Notifications are blocked. Turn them on for NothingToDo in system settings.'); }
 }); });
+// Local time for backup file names, e.g. 2026-10-29-0915.
+function stamp() {
+  const d = new Date(), p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+interface BackupSummary { tasks: number; skipped: number; exportedAt: number }
+const backupFile = $<HTMLInputElement>('#backup-file');
+const backupChoice = $<HTMLDivElement>('#backup-choice');
+let chosenBackup: string | null = null;
+function closeBackupChoice() { chosenBackup = null; backupFile.value = ''; backupChoice.hidden = true; }
+$('#export-backup').addEventListener('click', () => { void run(async () => {
+  status(`Backup saved to ${await invoke<string>('export_backup', { stamp: stamp() })}.`);
+}); });
+$('#choose-backup').addEventListener('click', () => backupFile.click());
+backupFile.addEventListener('change', () => { void run(async () => {
+  const file = backupFile.files?.[0];
+  if (!file) return;
+  const json = await file.text();
+  const preview = await invoke<BackupSummary & { currentTasks: number }>('preview_backup', { json });
+  chosenBackup = json;
+  const when = new Date(preview.exportedAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+  const skipped = preview.skipped ? ` ${preview.skipped} item(s) from a newer app version are kept on restore but cannot be added as copies.` : '';
+  $('#backup-summary').textContent = `Backup from ${when} with ${preview.tasks} task(s). This device has ${preview.currentTasks}.${skipped}`;
+  backupChoice.hidden = false;
+}); });
+$('#backup-cancel').addEventListener('click', closeBackupChoice);
+$('#backup-copy').addEventListener('click', () => { void run(async () => {
+  if (!chosenBackup) return;
+  const done = await invoke<BackupSummary>('copy_backup', { json: chosenBackup });
+  closeBackupChoice(); await refresh();
+  status(`Added ${done.tasks} task(s) from the backup${done.skipped ? `; left out ${done.skipped} from a newer app version` : ''}.`);
+}); });
+$('#backup-restore').addEventListener('click', () => { void run(async () => {
+  if (!chosenBackup) return;
+  const done = await invoke<BackupSummary & { previous: string }>('restore_backup', { json: chosenBackup, stamp: stamp() });
+  closeBackupChoice(); await refresh();
+  status(`Restored ${done.tasks} task(s). The data it replaced was saved to ${done.previous}.`);
+}); });
+
 syncForm.addEventListener('submit', event => {
   event.preventDefault();
   void run(async () => {

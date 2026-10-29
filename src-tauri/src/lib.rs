@@ -5,6 +5,7 @@ use tokio::sync::{Mutex, mpsc};
 
 #[cfg(target_os = "android")]
 mod android;
+mod backup;
 mod credentials;
 mod paths;
 mod reminders;
@@ -18,6 +19,9 @@ struct AppState {
     sync_status: Mutex<SyncStatus>,
     sync_trigger: mpsc::Sender<Trigger>,
     reminder_trigger: mpsc::Sender<()>,
+    /// Where backups are saved on desktop; Android uses Downloads.
+    #[cfg_attr(target_os = "android", allow(dead_code))]
+    data_dir: std::path::PathBuf,
 }
 
 impl AppState {
@@ -225,6 +229,7 @@ pub fn run() {
                 sync_status: Mutex::new(SyncStatus::default()),
                 sync_trigger,
                 reminder_trigger,
+                data_dir: paths.data_dir.clone(),
             });
             tauri::async_runtime::spawn(sync_worker::run(app.handle().clone(), receiver));
             tauri::async_runtime::spawn(reminders::run(app.handle().clone(), reminder_requests));
@@ -254,7 +259,11 @@ pub fn run() {
             sync_now,
             sync_status,
             open_notification_settings,
-            refresh_reminders
+            refresh_reminders,
+            backup::export_backup,
+            backup::preview_backup,
+            backup::restore_backup,
+            backup::copy_backup
         ])
         .run(tauri::generate_context!())
         .expect("error while running NothingToDo");
