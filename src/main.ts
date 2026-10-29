@@ -14,7 +14,12 @@ import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notif
 // input bar at the bottom. Keep additions inside that structure.
 
 // Schema 2 adds `kind` and, for markers, a local `date`; the core picks the schema when saving.
-interface Task { schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null; kind?: 'reminder' | 'marker' | 'alarm'; date?: string }
+type Repeat = { type: 'fixed'; minutes: number } | { type: 'calendar'; unit: 'day' | 'week' | 'month' | 'year'; every: number; weekdays?: number[] };
+interface Task {
+  schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null;
+  kind?: 'reminder' | 'marker' | 'alarm'; date?: string; durationMinutes?: number; repeat?: Repeat;
+  repeatFrom?: number; timeZone?: string; warnings?: number[];
+}
 interface Remote { key: string; value: Task | null; version: number; deleted: boolean }
 interface TaskRecord { task: Task | null; version: number; dirty: boolean; conflict: Remote | null; notifiedAt: number | null; localRevision: number; snooze: { of: number; until: number } | null; unsupported: { value: unknown; version: number } | null }
 interface SyncStatus {
@@ -43,26 +48,25 @@ root.innerHTML = `
       </div>
     </div>
     <div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
-      <form id="task-form" class="panel">
-        <div class="grip" aria-hidden="true"></div>
-        <input id="sheet-title" name="title" class="sheet-title" required maxlength="500" autocomplete="off" placeholder="What needs doing?" aria-label="Title">
-        <div class="keys" role="radiogroup" aria-label="Type">
-          <button type="button" class="key" disabled title="Alarms arrive with entry types"><i class="node al"></i>Alarm</button>
-          <button type="button" class="key on" data-kind="reminder" aria-pressed="true"><i class="node"></i>Reminder</button>
-          <button type="button" class="key" data-kind="marker" aria-pressed="false"><i class="node mk"></i>Marker</button>
+      <form id="task-form" class="panel add" novalidate>
+        <button type="button" id="sheet-handle" class="handle" aria-label="More fields"></button>
+        <div class="add-head">
+          <button type="button" id="pull-down" class="lbl full-only">↓ Pull down for less</button>
+          <span id="sheet-label" class="lbl short-only">New entry</span>
+          <span id="kind-label" class="lbl full-only"></span>
         </div>
-        <div class="readout">
-          <input name="time" type="time" class="dot" aria-label="Time">
-          <span id="readout-day" class="lbl"></span>
+        <input id="sheet-title" name="title" class="input" required maxlength="500" autocomplete="off" placeholder="What needs doing?" aria-label="Title">
+        <div class="short-only">
+          <div id="keys" class="keys" role="radiogroup" aria-label="Type"></div>
+          <button type="button" id="readout" class="readout" aria-label="Time"></button>
+          <div id="day-chips" class="chips" role="radiogroup" aria-label="Day"></div>
+          <button type="button" id="pull-up" class="grip"><i></i><span class="lbl">Pull up for more</span></button>
         </div>
-        <div id="day-chips" class="chips" role="radiogroup" aria-label="Day"></div>
-        <input name="date" type="date" hidden aria-label="Date">
-        <label class="lbl">Notes <textarea name="notes" maxlength="8000" rows="3"></textarea></label>
-        <p id="delivery-hint" class="note"></p>
-        <div class="row-actions">
-          <button class="pill on" type="submit"><span id="sheet-submit">↵ Add</span></button>
-          <button id="cancel-edit" class="pill" type="button">Cancel</button>
-        </div>
+        <div id="tiles" class="tiles full-only"></div>
+        <p id="delivery-hint" class="note full-only"></p>
+        <button class="btn f" type="submit"><span class="rdot"></span><span id="sheet-submit">Add reminder</span></button>
+        <div id="peek" class="peek short-only"></div>
+        <input type="date" id="pick-date" class="pick" tabindex="-1" aria-hidden="true">
       </form>
     </div>
     <div id="settings" class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-heading" hidden>
@@ -110,7 +114,6 @@ const form = $<HTMLFormElement>('#task-form');
 const syncForm = $<HTMLFormElement>('#sync-form');
 const gutter = $<HTMLDivElement>('#gutter');
 const quick = $<HTMLInputElement>('#quick-input');
-const cancelEdit = $<HTMLButtonElement>('#cancel-edit');
 const sheet = $<HTMLDivElement>('#sheet');
 const settings = $<HTMLDivElement>('#settings');
 let data: Snapshot = { records: {}, cursor: 0, binding: null };
@@ -135,7 +138,6 @@ function pill(label: string, action: () => Promise<void> | void, className = '')
   element.addEventListener('click', event => { event.stopPropagation(); void run(action); });
   return element;
 }
-function field(name: string) { return form.elements.namedItem(name) as HTMLInputElement | HTMLTextAreaElement; }
 
 // Messages replace the right-hand hint under the input bar for a few seconds.
 let statusTimer = 0;
@@ -298,7 +300,17 @@ function row(id: string, record: TaskRecord, now: number, showDay = false) {
   node.type = 'button';
   node.disabled = readOnly || !task;
   node.setAttribute('aria-label', done ? `Reopen ${task?.title}` : `Complete ${task?.title ?? 'task'}`);
-  if (task) node.addEventListener('click', event => { event.stopPropagation(); void run(() => save(id, { ...task, completed: !done })); });
+  if (task) node.addEventListener('click', event => {
+    event.stopPropagation();
+    void run(async () => {
+      await save(id, { ...task, completed: !done });
+      // A repeating task moves on rather than completing; say where it went.
+      const next = data.records[id]?.task;
+      if (task.repeat && !done && next && !next.completed) {
+        status(`Next · ${next.kind === 'marker' && next.date ? shortDay(new Date(`${next.date}T00:00`).getTime()) : next.remindAt !== null ? `${shortDay(next.remindAt)} · ${clock(next.remindAt)}` : ''}`);
+      }
+    });
+  });
   const markedDay = markerDay(record);
   const time = marker && markedDay !== null ? (showDay ? shortDay(markedDay) : 'all day')
     : due === null ? '—' : showDay ? `${weekday(due)} ${clock(due)}` : clock(due);
@@ -319,6 +331,12 @@ function details(id: string, record: TaskRecord, now: number) {
   const due = reminderAt(record);
   const box = el('div', 'gt-detail');
   if (task?.notes) box.append(el('p', 'notes', task.notes));
+  const facts = [
+    task?.durationMinutes ? durationText(task.durationMinutes).join(' ').trim() : '',
+    task?.repeat ? `repeats ${repeatText(task.repeat).join(' ').trim().toLowerCase()}` : '',
+    task?.warnings?.length ? `warns ${[...task.warnings].sort((a, b) => b - a).map(w => spanText(w).toLowerCase()).join(', ')}` : '',
+  ].filter(Boolean);
+  if (facts.length) box.append(el('p', 'lbl', facts.join(' · ')));
   if (task && due !== null && due !== task.remindAt && !task.completed) box.append(el('p', 'lbl', `Snoozed on this device until ${clock(due)}`));
   if (record.dirty && sync.connected) box.append(el('p', 'lbl', 'Not yet synced'));
   if (readOnly) box.append(el('p', 'lbl', 'Changed by a newer app version. Update to edit.'));
@@ -327,6 +345,10 @@ function details(id: string, record: TaskRecord, now: number) {
     actions.append(pill('Edit', () => openSheet(id)));
     // Only a reminder that has gone off can be snoozed; snoozing earlier would bring it forward.
     if (!task.completed && due !== null && due <= now) actions.append(pill('Snooze 10m', async () => { await invoke('snooze_task', { id, minutes: 10 }); await refresh(); }));
+    if (task.repeat) {
+      const { repeat: _r, repeatFrom: _f, ...single } = task;
+      actions.append(pill('End repeat', () => save(id, single)));
+    }
     actions.append(pill('Delete', async () => { await invoke('delete_task', { id }); expanded = null; await refresh(); }));
     box.append(actions);
   }
@@ -518,103 +540,426 @@ $<HTMLDivElement>('#strip').addEventListener('touchend', event => {
   if (Math.abs(dx) > 50) { selectedDay = addDays(selectedDay, dx < 0 ? 7 : -7); expanded = null; render(); }
 });
 
-// ── The sheet: every field, for adding with notes and for editing ──
-function chooseDay(day: number) {
-  field('date').value = isoDate(day);
-  $('#readout-day').textContent = longDay(day);
-  const chips = [...$<HTMLDivElement>('#day-chips').children] as HTMLElement[];
-  for (const chip of chips) chip.classList.toggle('on', chip.dataset.day === String(day));
-  (field('date') as HTMLInputElement).hidden = chips.some(c => c.dataset.day === String(day));
+// ── The add sheet: decided direction B (short sheet, pull up for more), B1 tiles, B2 instruments ──
+type Kind = 'reminder' | 'marker';
+interface Draft { kind: Kind; day: number; minutes: number | null; duration: number | null; repeat: Repeat | null; warnings: number[]; notes: string }
+let draft: Draft = { kind: 'reminder', day: startOfDay(Date.now()), minutes: null, duration: null, repeat: null, warnings: [], notes: '' };
+let pulled = false;
+let openTile: string | null = null;
+let preview: number[] = [];
+const titleInput = $<HTMLInputElement>('#sheet-title');
+const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+const at = (day: number, minutes: number) => { const d = new Date(day); d.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0); return d.getTime(); };
+const draftTime = () => (draft.kind === 'reminder' && draft.minutes !== null ? at(draft.day, draft.minutes) : null);
+function durationText(m: number) { return m < 60 ? [String(m), 'min'] : m % 60 ? [`${Math.floor(m / 60)}h${two(m % 60)}`, ''] : [String(m / 60), m === 60 ? 'hour' : 'hours']; }
+function spanText(m: number) { return m === 0 ? 'Day of' : m % 10080 === 0 ? `${m / 10080}W` : m % 1440 === 0 ? `${m / 1440}D` : m % 60 === 0 ? `${m / 60}H` : `${m}M`; }
+const WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+function repeatText(r: Repeat | null): [string, string] {
+  if (!r) return ['Never', ''];
+  if (r.type === 'fixed') return r.minutes % 1440 === 0 ? [String(r.minutes / 1440), 'd'] : [String(r.minutes / 60), 'h'];
+  const days = r.weekdays ?? [];
+  if (days.length && days.length < 7) {
+    if (days.join() === '1,2,3,4,5') return ['Mon–Fri', ''];
+    if (days.join() === '6,7') return ['Weekends', ''];
+    return [days.map(d => WEEKDAYS[d - 1]).join(''), r.unit === 'week' && r.every > 1 ? `every ${r.every} wk` : ''];
+  }
+  if (r.unit === 'day') return r.every === 1 ? ['Daily', ''] : [String(r.every), 'd'];
+  if (r.unit === 'week') return r.every === 1 ? ['Weekly', ''] : [String(r.every), 'wk'];
+  if (r.unit === 'month') return r.every === 12 ? ['Yearly', ''] : [String(r.every), 'mo'];
+  return ['Yearly', ''];
 }
-function renderChips() {
-  const chips = $<HTMLDivElement>('#day-chips');
-  chips.replaceChildren();
+const sameRepeat = (a: Repeat | null, b: Repeat | null) => JSON.stringify(a) === JSON.stringify(b);
+
+// The task this draft would save, merged over the stored one so unknown fields survive.
+function draftTask(): Task {
+  const existing = editing ? data.records[editing]?.task : null;
+  const { kind: _k, date: _d, durationMinutes: _m, repeat: _r, timeZone: _z, warnings: _w, ...rest } = existing ?? {} as Partial<Task>;
+  const marker = draft.kind === 'marker';
+  const timed = draftTime();
+  return {
+    ...rest, schemaVersion: 1, title: titleInput.value, notes: draft.notes,
+    completed: existing?.completed ?? false, remindAt: marker ? null : timed,
+    ...(marker ? { kind: 'marker' as const, date: isoDate(draft.day) } : {}),
+    ...(draft.duration ? { durationMinutes: draft.duration } : {}),
+    ...(draft.repeat ? { repeat: draft.repeat } : {}),
+    ...(draft.warnings.length ? { warnings: [...draft.warnings].sort((a, b) => b - a) } : {}),
+    ...(draft.repeat || draft.warnings.length ? { timeZone: existing?.timeZone ?? zone } : {}),
+  };
+}
+
+let previewTimer = 0;
+function refreshPreview() {
+  clearTimeout(previewTimer);
+  preview = [];
+  if (!draft.repeat || (draft.kind === 'reminder' && draft.minutes === null) || !isTauri()) return;
+  previewTimer = window.setTimeout(async () => {
+    try { preview = await invoke<number[]>('preview_occurrences', { task: { ...draftTask(), title: titleInput.value || 'Preview', schemaVersion: 2 }, count: 3 }); }
+    catch { preview = []; }
+    renderSheet();
+  }, 150);
+}
+
+function choice(label: string, on: boolean, action: () => void, className = '') {
+  const b = el('button', `${className}${on ? ' on' : ''}`, label);
+  b.type = 'button';
+  b.setAttribute('aria-pressed', String(on));
+  b.addEventListener('click', event => { event.stopPropagation(); action(); renderSheet(); refreshPreview(); });
+  return b;
+}
+function svg(tag: string, attrs: Record<string, string | number>) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+  return node;
+}
+
+// B2 instrument for When: a 24-hour dot dial. 48 half-hour dots, the quarters larger and
+// labelled; drag or tap anywhere on it to set the time in 5-minute steps.
+function dial() {
+  const wrap = el('div', 'dial');
+  const s = svg('svg', { viewBox: '0 0 210 210' });
+  const c = 105, r = 92;
+  for (let i = 0; i < 48; i++) {
+    const a = (i / 48) * 2 * Math.PI - Math.PI / 2, quarter = i % 12 === 0;
+    s.append(svg('circle', { cx: c + r * Math.cos(a), cy: c + r * Math.sin(a), r: quarter ? 2.6 : 1.6, fill: quarter ? 'var(--fg)' : 'var(--faint)' }));
+    if (quarter) {
+      const t = svg('text', { x: c + (r - 15) * Math.cos(a), y: c + (r - 15) * Math.sin(a) + 3, 'text-anchor': 'middle', 'font-family': 'Space Mono', 'font-size': 8, fill: 'var(--dim)' });
+      t.textContent = two(i / 2);
+      s.append(t);
+    }
+  }
+  if (draft.minutes !== null) {
+    const a = (draft.minutes / 1440) * 2 * Math.PI - Math.PI / 2;
+    s.append(svg('line', { x1: c, y1: c, x2: c + r * Math.cos(a), y2: c + r * Math.sin(a), stroke: 'var(--fg)', 'stroke-width': 1.5, 'stroke-dasharray': '1 3', 'stroke-linecap': 'round' }));
+    s.append(svg('circle', { cx: c + r * Math.cos(a), cy: c + r * Math.sin(a), r: 7, fill: 'var(--fg)' }));
+  }
+  const centre = el('div', 'c');
+  centre.append(el('span', 'dot big', draft.minutes !== null ? `${two(Math.floor(draft.minutes / 60))}:${two(draft.minutes % 60)}` : '--:--'), el('br'),
+    el('span', 'lbl', `${shortDay(draft.day)}${draftTime() !== null ? ` · in ${countdown(draftTime()!, Date.now())}` : ''}`));
+  wrap.append(s, centre);
+  const set = (event: PointerEvent) => {
+    const box = s.getBoundingClientRect();
+    const x = event.clientX - box.left - box.width / 2, y = event.clientY - box.top - box.height / 2;
+    const turn = (Math.atan2(y, x) + Math.PI / 2 + 2 * Math.PI) % (2 * Math.PI);
+    draft.minutes = (Math.round((turn / (2 * Math.PI)) * 1440 / 5) * 5) % 1440;
+    renderSheet();
+  };
+  s.addEventListener('pointerdown', event => { s.setPointerCapture(event.pointerId); set(event); });
+  s.addEventListener('pointermove', event => { if (s.hasPointerCapture(event.pointerId)) set(event); });
+  s.addEventListener('pointerup', () => refreshPreview());
+  return wrap;
+}
+
+// B2 instrument for Duration: a dot bar, one dot per 5 minutes up to 2 hours.
+function durationTrack() {
+  const wrap = el('div');
+  const track = el('div', 'track');
+  for (let i = 1; i <= 24; i++) {
+    const dot = el('button', (draft.duration ?? 0) >= i * 5 ? 'on' : '');
+    dot.type = 'button';
+    dot.setAttribute('aria-label', `${i * 5} minutes`);
+    dot.addEventListener('click', event => { event.stopPropagation(); draft.duration = i * 5; renderSheet(); });
+    track.append(dot);
+  }
+  const labels = el('div', 'track-l');
+  for (const l of ['0', '30m', '1h', '1h30', '2h']) labels.append(el('span', '', l));
+  wrap.append(track, labels);
+  return wrap;
+}
+
+// B2 instrument for Warn before: a dot timeline up to the start, warnings lit.
+function warnTimeline() {
+  const marker = draft.kind === 'marker';
+  const marks = marker ? [10080, 2880, 1440, 0] : [10080, 2880, 1440, 120, 60, 30, 15, 10, 5];
+  const wrap = el('div');
+  const track = el('div', 'track');
+  for (const m of marks) track.append(el('i', draft.warnings.includes(m) ? 'on' : ''));
+  track.append(el('i', 'big'));
+  const labels = el('div', 'track-l');
+  labels.append(el('span', '', '−1W'), el('span', '', marker ? '09:00 on the day' : 'start'));
+  wrap.append(track, labels);
+  return wrap;
+}
+
+// The Repeat tile's ring: one cycle, with the occurrences in it lit.
+function repeatRing(r: Repeat | null) {
+  let dots = 12;
+  let lit: (i: number) => boolean = i => i === 0;
+  if (r?.type === 'fixed') { dots = 12; lit = i => r.minutes < 1440 ? i % Math.max(1, Math.round(12 * r.minutes / 1440)) === 0 : i === 0; }
+  else if (r && (r.unit === 'day' || r.unit === 'week')) {
+    dots = 7;
+    const days = r.weekdays?.length ? r.weekdays : r.unit === 'day' ? [1, 2, 3, 4, 5, 6, 7] : [((new Date(draft.day).getDay() + 6) % 7) + 1];
+    lit = i => days.includes(i + 1);
+  } else if (r?.unit === 'month') lit = i => i % r.every === 0;
+  const s = svg('svg', { width: 54, height: 54, viewBox: '0 0 60 60', 'aria-hidden': 'true' });
+  for (let i = 0; i < dots; i++) {
+    const a = (i / dots) * 2 * Math.PI - Math.PI / 2;
+    s.append(svg('circle', { cx: 30 + 23 * Math.cos(a), cy: 30 + 23 * Math.sin(a), r: lit(i) && r ? 2.9 : 1.8, fill: lit(i) && r ? 'var(--fg)' : 'var(--faint)' }));
+  }
+  return s;
+}
+
+const TILES = ['when', 'duration', 'repeat', 'warn', 'type', 'notes'] as const;
+type TileName = typeof TILES[number];
+function tile(name: TileName) {
+  const open = openTile === name;
+  const t = el('div', `tl${name === 'when' || name === 'notes' || open ? ' w' : ''}${openTile && !open ? ' faded' : ''}${open ? ' open' : ''}`);
+  t.setAttribute('role', 'button');
+  t.tabIndex = 0;
+  t.addEventListener('click', () => { if (!open) { openTile = name; renderSheet(); refreshPreview(); } });
+  const row2 = (...parts: Node[]) => { const r = el('div', 'row2'); r.append(...parts); return r; };
+  const big = (text: string, size = '') => el('span', `dot big${size}`, text);
+  const presets = (items: [string, boolean, () => void][], ghost = false) => {
+    const g = el('div', 'pgrid');
+    for (const [label, on, action] of items) g.append(choice(label, on, action, ghost ? 'ghost' : ''));
+    return g;
+  };
+  const marker = draft.kind === 'marker';
+  if (name === 'when') {
+    const time = draftTime();
+    const left = el('div');
+    left.append(el('span', 'lbl', 'When'), el('div', 'gap'), big(marker ? 'All day' : draft.minutes !== null ? clock(time!) : '--:--'));
+    const right = el('span', 'lbl right', `${longDay(draft.day)}${time !== null ? `\nin ${countdown(time, Date.now())}` : ''}`);
+    t.append(row2(left, right));
+    if (open) {
+      if (!marker) {
+        t.append(dial());
+        const now = draft.minutes ?? Math.ceil((new Date().getHours() * 60 + new Date().getMinutes()) / 30) * 30;
+        t.append(presets([
+          ['−30m', false, () => { draft.minutes = (now + 1410) % 1440; }],
+          ['07:00', draft.minutes === 420, () => { draft.minutes = 420; }],
+          ['09:00', draft.minutes === 540, () => { draft.minutes = 540; }],
+          ['12:00', draft.minutes === 720, () => { draft.minutes = 720; }],
+          ['18:00', draft.minutes === 1080, () => { draft.minutes = 1080; }],
+          ['+30m', false, () => { draft.minutes = (now + 30) % 1440; }],
+          ['No time', draft.minutes === null, () => { draft.minutes = null; draft.repeat = null; }],
+        ]));
+      }
+      t.append(dayChips());
+    }
+  } else if (name === 'duration') {
+    const [n, unit] = draft.duration ? durationText(draft.duration) : ['—', ''];
+    t.append(el('span', 'lbl', 'Duration'), row2(big(n), el('span', 'unit', unit)));
+    if (open) {
+      t.append(durationTrack(), presets([
+        ['None', !draft.duration, () => { draft.duration = null; }],
+        ...[15, 30, 45, 60, 90, 120, 180].map(m => [durationText(m).join(' ').replace('1 hour', '1h').replace(' hours', 'h'), draft.duration === m, () => { draft.duration = m; }] as [string, boolean, () => void]),
+      ]));
+    }
+  } else if (name === 'repeat') {
+    const [n, unit] = repeatText(draft.repeat);
+    const value = el('div');
+    value.append(big(n, n.length > 3 ? ' small' : ''), el('span', 'unit', unit));
+    t.append(el('span', 'lbl', 'Repeat'), row2(value, repeatRing(draft.repeat)));
+    if (open) {
+      const cal = (unit: 'day' | 'week' | 'month' | 'year', every: number): Repeat => ({ type: 'calendar', unit, every });
+      const options: [string, Repeat | null][] = marker
+        ? [['Never', null], ['Weekly', cal('week', 1)], ['1 mo', cal('month', 1)], ['Yearly', cal('year', 1)]]
+        : [['Never', null], ['8 h', { type: 'fixed', minutes: 480 }], ['Daily', cal('day', 1)], ['Weekly', cal('week', 1)], ['28 d', { type: 'fixed', minutes: 40320 }],
+          ['1 mo', cal('month', 1)], ['3 mo', cal('month', 3)], ['4 mo', cal('month', 4)], ['6 mo', cal('month', 6)], ['12 mo', cal('year', 1)]];
+      const current = draft.repeat?.type === 'calendar' ? { ...draft.repeat, weekdays: undefined } : draft.repeat;
+      t.append(presets(options.map(([label, r]) => [label, sameRepeat(current as Repeat | null, r), () => {
+        if (!marker && draft.minutes === null) draft.minutes = 540;
+        draft.repeat = r;
+      }])));
+      const r = draft.repeat;
+      if (r?.type === 'calendar' && (r.unit === 'day' || r.unit === 'week')) {
+        const days = r.weekdays ?? [];
+        const setDays = (d: number[]) => { draft.repeat = { ...r, weekdays: d.length && d.length < 7 ? d : undefined }; };
+        const short = el('div', 'row2 spaced');
+        const shortcuts = el('span', 'lbl');
+        shortcuts.append(choice('Weekdays', days.join() === '1,2,3,4,5', () => setDays([1, 2, 3, 4, 5]), 'link'), document.createTextNode(' · '),
+          choice('Weekends', days.join() === '6,7', () => setDays([6, 7]), 'link'), document.createTextNode(' · '),
+          choice('All', !days.length, () => setDays([]), 'link'));
+        short.append(el('span', 'lbl', 'Days'), shortcuts);
+        const row = el('div', 'days');
+        WEEKDAYS.forEach((letter, i) => {
+          const d = i + 1, on = days.includes(d);
+          row.append(choice(letter, on, () => setDays(on ? days.filter(x => x !== d) : [...days, d].sort())));
+        });
+        t.append(short, row);
+      }
+      if (preview.length) {
+        const fmt = (ms: number) => marker ? shortDay(ms) : `${shortDay(ms)} · ${clock(ms)}`;
+        t.append(row2(el('span', 'unit', `Next · ${fmt(preview[0])}`), el('span', 'unit', preview.length > 1 ? `then ${preview.slice(1).map(p => weekday(p)).join(', ')}` : '')));
+      }
+    }
+  } else if (name === 'warn') {
+    const values = el('div', 'stack');
+    const sorted = [...draft.warnings].sort((a, b) => b - a);
+    if (sorted.length) for (const w of sorted.slice(0, 2)) values.append(big(spanText(w), ' small'));
+    else values.append(big('—'));
+    t.append(el('span', 'lbl', 'Warn before'), row2(values, el('span', 'unit', sorted.length ? `${sorted.length} set` : '')));
+    if (open) {
+      const marks = marker ? [0, 1440, 2880, 10080] : [5, 10, 15, 30, 60, 120, 1440, 2880, 10080];
+      t.append(warnTimeline(), presets(marks.map(m => [m === 0 ? 'Day of' : spanText(m).toLowerCase().replace('w', ' wk').replace('d', ' d').replace('h', ' h').replace('m', ' min'), draft.warnings.includes(m), () => {
+        draft.warnings = draft.warnings.includes(m) ? draft.warnings.filter(x => x !== m) : [...draft.warnings, m];
+      }])));
+      if (marker) t.append(el('p', 'unit', 'Counted back from 09:00 on the day'));
+    }
+  } else if (name === 'type') {
+    const value = el('div', 'type-value');
+    value.append(el('i', `node${marker ? ' mk' : ''}`), el('span', '', marker ? 'Marker' : 'Reminder'));
+    t.append(el('span', 'lbl', 'Type'), value);
+    if (open) t.append(keys());
+  } else {
+    t.append(el('span', 'lbl', 'Notes'));
+    if (open) {
+      const area = el('textarea');
+      area.maxLength = 8000; area.rows = 4; area.value = draft.notes;
+      area.addEventListener('input', () => { draft.notes = area.value; });
+      area.addEventListener('click', event => event.stopPropagation());
+      t.append(area);
+      setTimeout(() => area.focus());
+    } else t.append(el('span', 'notes-line', draft.notes.split('\n')[0] || 'Add notes'));
+  }
+  if (open) {
+    const done = el('button', 'pill', 'Done');
+    done.type = 'button';
+    done.addEventListener('click', event => { event.stopPropagation(); openTile = null; renderSheet(); });
+    t.append(done);
+  }
+  return t;
+}
+
+function keys() {
+  const wrap = el('div', 'keys');
+  const alarm = el('button', 'key', 'Alarm');
+  alarm.type = 'button'; alarm.disabled = true; alarm.title = 'Alarms arrive once they can ring until stopped';
+  alarm.prepend(el('i', 'node al'));
+  wrap.append(alarm);
+  for (const k of ['reminder', 'marker'] as const) {
+    const b = choice(k === 'reminder' ? 'Reminder' : 'Marker', draft.kind === k, () => {
+      draft.kind = k;
+      if (k === 'marker') { draft.minutes = null; draft.warnings = draft.warnings.filter(w => w === 0 || w % 1440 === 0); if (draft.repeat?.type === 'fixed') draft.repeat = null; }
+      else draft.warnings = draft.warnings.filter(w => w !== 0);
+    }, 'key');
+    b.prepend(el('i', `node${k === 'marker' ? ' mk' : ''}`));
+    wrap.append(b);
+  }
+  return wrap;
+}
+
+function dayChips() {
+  const chips = el('div', 'chips');
   const today = startOfDay(Date.now());
-  for (const [day, label] of [[today, 'Today'], [addDays(today, 1), 'Tomorrow'], [addDays(today, 2), weekday(addDays(today, 2))]] as const) {
-    const chip = el('button', 'pill', label);
-    chip.type = 'button'; chip.dataset.day = String(day);
-    chip.addEventListener('click', () => chooseDay(day));
-    chips.append(chip);
+  for (const [day, label] of [[today, 'Today'], [addDays(today, 1), shortDay(addDays(today, 1))], [addDays(today, 2), shortDay(addDays(today, 2))]] as const) {
+    chips.append(choice(label, draft.day === day, () => { draft.day = day; }, 'pill'));
   }
-  const pick = el('button', 'pill', 'Pick');
-  pick.type = 'button';
-  pick.addEventListener('click', () => { const input = field('date') as HTMLInputElement; input.hidden = false; input.showPicker?.(); input.focus(); });
-  chips.append(pick);
+  const picked = ![today, addDays(today, 1), addDays(today, 2)].includes(draft.day);
+  chips.append(choice(picked ? shortDay(draft.day) : 'Pick…', picked, () => {
+    const pick = $<HTMLInputElement>('#pick-date');
+    pick.value = isoDate(draft.day);
+    pick.showPicker?.();
+  }, 'pill'));
+  return chips;
 }
-// The type keys: a reminder has a time, a marker only a day. Alarms wait for their ringing path.
-let kind: 'reminder' | 'marker' = 'reminder';
-function chooseKind(next: 'reminder' | 'marker') {
-  kind = next;
-  for (const key of document.querySelectorAll<HTMLElement>('.key[data-kind]')) {
-    key.classList.toggle('on', key.dataset.kind === next);
-    key.setAttribute('aria-pressed', String(key.dataset.kind === next));
+$<HTMLInputElement>('#pick-date').addEventListener('change', event => {
+  const value = (event.target as HTMLInputElement).value;
+  if (value) { draft.day = new Date(`${value}T00:00`).getTime(); renderSheet(); refreshPreview(); }
+});
+
+function renderSheet() {
+  form.classList.toggle('full', pulled);
+  form.classList.toggle('short', !pulled);
+  const marker = draft.kind === 'marker';
+  $('#sheet-label').textContent = editing ? 'Edit entry' : 'New entry';
+  $('#kind-label').textContent = marker ? 'Marker' : 'Reminder';
+  $('#keys').replaceWith(Object.assign(keys(), { id: 'keys' }));
+  const time = draftTime();
+  const readout = $<HTMLButtonElement>('#readout');
+  readout.replaceChildren(el('span', 'dot big', marker ? 'All day' : time !== null ? clock(time) : '--:--'),
+    el('span', 'lbl right', `${shortDay(draft.day)}${time !== null ? `\nin ${countdown(time, Date.now())}` : ''}`));
+  $('#day-chips').replaceWith(Object.assign(dayChips(), { id: 'day-chips' }));
+  const peek = $<HTMLDivElement>('#peek');
+  peek.replaceChildren();
+  for (const [name, label] of [['duration', 'Duration'], ['repeat', 'Repeat'], ['warn', 'Warn']] as const) {
+    const p = el('button', '', '');
+    p.type = 'button';
+    p.append(el('span', 'lbl', label));
+    p.addEventListener('click', () => { pulled = true; openTile = name; renderSheet(); refreshPreview(); });
+    peek.append(p);
   }
-  ($('.readout input') as HTMLInputElement).hidden = next === 'marker';
+  const tiles = $<HTMLDivElement>('#tiles');
+  tiles.replaceChildren(...TILES.map(tile));
+  $('#sheet-submit').textContent = editing ? 'Save' : `Add ${marker ? 'marker' : 'reminder'}`;
 }
-for (const key of document.querySelectorAll<HTMLElement>('.key[data-kind]')) {
-  key.addEventListener('click', () => chooseKind(key.dataset.kind as 'reminder' | 'marker'));
-}
+
 function openSheet(id: string | null) {
   const fromBar = id ? null : parse(quick.value);
   editing = id;
-  form.reset();
-  renderChips();
   const record = id ? data.records[id] : null;
   const task = record?.task ?? null;
-  const at = task?.remindAt ?? (fromBar ? quickTarget(fromBar) : null);
+  const barTime = fromBar ? quickTarget(fromBar) : null;
   const marked = record ? markerDay(record) : null;
-  chooseKind(task ? (task.kind === 'marker' ? 'marker' : 'reminder') : at !== null ? 'reminder' : 'marker');
-  field('title').value = task?.title ?? fromBar?.title ?? '';
-  field('notes').value = task?.notes ?? '';
-  field('time').value = at !== null ? clock(at) : '';
-  chooseDay(marked ?? (at !== null ? startOfDay(at) : fromBar?.day ?? Math.max(selectedDay, startOfDay(Date.now()))));
-  $('#sheet-submit').textContent = id ? '↵ Save' : '↵ Add';
+  const timed = task?.remindAt ?? barTime;
+  draft = {
+    kind: task ? (task.kind === 'marker' ? 'marker' : 'reminder') : 'reminder',
+    day: marked ?? (timed !== null ? startOfDay(timed) : fromBar?.day ?? Math.max(selectedDay, startOfDay(Date.now()))),
+    minutes: timed !== null && task?.kind !== 'marker' ? new Date(timed).getHours() * 60 + new Date(timed).getMinutes() : null,
+    duration: task?.durationMinutes ?? null,
+    repeat: task?.repeat ?? null,
+    warnings: task?.warnings ?? [],
+    notes: task?.notes ?? '',
+  };
+  titleInput.value = task?.title ?? fromBar?.title ?? '';
+  pulled = false;
+  openTile = null;
+  renderSheet();
+  refreshPreview();
   sheet.hidden = false;
-  field('title').focus();
+  titleInput.focus();
 }
-function resetEditor() { editing = null; form.reset(); sheet.hidden = true; }
+function resetEditor() { editing = null; sheet.hidden = true; openTile = null; pulled = false; }
+
+// Pull the sheet up for every field, down for the short form: drag the handle or tap it.
+function pullable(target: HTMLElement, up: boolean) {
+  let y: number | null = null;
+  target.addEventListener('touchstart', event => { y = event.touches[0].clientY; }, { passive: true });
+  target.addEventListener('touchend', event => {
+    if (y === null) return;
+    const dy = event.changedTouches[0].clientY - y;
+    y = null;
+    if (up ? dy < -30 : dy > 30) { pulled = up; openTile = null; renderSheet(); }
+  });
+}
+$('#pull-up').addEventListener('click', () => { pulled = true; renderSheet(); });
+$('#pull-down').addEventListener('click', () => { pulled = false; openTile = null; renderSheet(); });
+$('#sheet-handle').addEventListener('click', () => { pulled = !pulled; openTile = null; renderSheet(); });
+$('#readout').addEventListener('click', () => { pulled = true; openTile = 'when'; renderSheet(); });
+pullable($('#pull-up'), true);
+pullable($('#sheet-handle'), !pulled);
+pullable($('.add-head'), false);
 
 // Android's back gesture asks this first (MainActivity.kt): close what is open and return true,
 // or return false to let back leave the app.
 (window as unknown as { nothingToDoBack: () => boolean }).nothingToDoBack = () => {
   if (!settings.hidden) { closeSettings(); return true; }
+  if (!sheet.hidden && openTile) { openTile = null; renderSheet(); return true; }
+  if (!sheet.hidden && pulled) { pulled = false; renderSheet(); return true; }
   if (!sheet.hidden) { resetEditor(); return true; }
   if (quick.value) { quick.value = ''; quick.blur(); render(); return true; }
   if (expanded) { expanded = null; render(); return true; }
   return false;
 };
 $('#open-sheet').addEventListener('click', () => openSheet(null));
-field('date').addEventListener('change', () => {
-  const value = field('date').value;
-  if (value) chooseDay(startOfDay(new Date(`${value}T00:00`).getTime()));
-});
 sheet.addEventListener('click', event => { if (event.target === sheet) resetEditor(); });
-cancelEdit.addEventListener('click', resetEditor);
 form.addEventListener('submit', event => {
   event.preventDefault();
   void run(async () => {
-    const time = field('time').value, date = field('date').value;
-    const marker = kind === 'marker';
-    const remindAt = !marker && time ? new Date(`${date}T${time}`).getTime() : null;
-    if (remindAt !== null && !Number.isFinite(remindAt)) throw new Error('Enter a valid date and time.');
-    const existing = editing ? data.records[editing]?.task : null;
+    if (!titleInput.value.trim()) { titleInput.focus(); status('Give it a title first.'); return; }
+    const task = draftTask();
     const wasNew = !editing;
-    const { kind: _kind, date: _date, ...rest } = existing ?? {};
-    await save(editing, {
-      ...rest, schemaVersion: marker ? 2 : 1, title: field('title').value, notes: field('notes').value,
-      completed: existing?.completed ?? false, remindAt,
-      ...(marker ? { kind: 'marker' as const, date } : {}),
-    } satisfies Task);
-    if (remindAt !== null) selectedDay = startOfDay(remindAt);
-    else if (marker) selectedDay = new Date(`${date}T00:00`).getTime();
+    await save(editing, task);
+    selectedDay = draft.day;
     if (wasNew) quick.value = '';
     resetEditor(); render();
-    await askForNotifications(remindAt);
+    await askForNotifications(task.remindAt ?? (task.warnings?.length ? 1 : null));
   });
 });
 // Android schedules reminders with the OS; desktop shows them from the running app.
 $('#delivery-hint').textContent = /Android/i.test(navigator.userAgent)
-  ? 'Times use this device’s timezone. Reminders fire even when the app is closed.'
+  ? 'Times use this device’s timezone. Reminders and warnings fire even when the app is closed.'
   : 'Times use this device’s timezone. Reminders need the app running; closing the window keeps it in the tray.';
 
 // ── Notifications ──
@@ -729,9 +1074,7 @@ $('#backup-restore').addEventListener('click', () => { void run(async () => {
 document.addEventListener('keydown', event => {
   const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
   if (event.key === 'Escape') {
-    if (!settings.hidden) closeSettings();
-    else if (!sheet.hidden) resetEditor();
-    else if (document.activeElement === quick) { quick.value = ''; quick.blur(); render(); }
+    (window as unknown as { nothingToDoBack: () => boolean }).nothingToDoBack();
     return;
   }
   if (typing || event.ctrlKey || event.metaKey || event.altKey || !sheet.hidden || !settings.hidden) return;
