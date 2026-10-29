@@ -256,6 +256,7 @@ function renderHeader(shownDay: number, preview: boolean) {
     for (const due of dues.slice(0, 4)) load.append(el('i', due <= now ? 'r' : ''));
     cell.append(el('span', 'lbl', new Date(day).toLocaleDateString([], { weekday: 'narrow' })),
       el('b', new Date(day).getMonth() !== month ? 'dim' : '', two(new Date(day).getDate())), load);
+    cell.dataset.day = String(day);
     cell.addEventListener('click', () => { selectedDay = day; expanded = null; render(); });
     strip.append(cell);
   }
@@ -294,7 +295,8 @@ function row(id: string, record: TaskRecord, now: number, showDay = false) {
   const sy = el('span', record.conflict ? 'sy c' : record.dirty && sync.connected ? 'sy p' : 'sy');
   line.append(el('span', `tm${late ? ' red' : done ? ' dim' : ''}`, time), node, title,
     el('span', `n${late ? ' red' : ''}`, done ? 'done' : due !== null ? countdown(due, now) : ''), sy);
-  line.addEventListener('click', () => { expanded = expanded === id ? null : id; render(); });
+  line.addEventListener('click', () => { if (lifted) return; expanded = expanded === id ? null : id; render(); });
+  if (task && !readOnly && task.remindAt !== null) holdToMove(line, id);
   gutter.append(line);
   if (expanded === id || record.conflict) gutter.append(details(id, record, now));
 }
@@ -419,6 +421,63 @@ $<HTMLFormElement>('#quick').addEventListener('submit', event => {
 });
 $('#unscheduled').addEventListener('click', () => { showUnscheduled = !showUnscheduled; render(); });
 
+// ── Reschedule: press and hold a row, then drop it on a day in the strip. It keeps its time. ──
+let lifted: string | null = null;
+function holdToMove(line: HTMLElement, id: string) {
+  let timer = 0, startX = 0, startY = 0;
+  const cancel = () => clearTimeout(timer);
+  line.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || (event.target as HTMLElement).closest('.node')) return;
+    startX = event.clientX; startY = event.clientY;
+    timer = window.setTimeout(() => {
+      lifted = id; line.classList.add('lifted');
+      document.body.classList.add('dragging');
+      navigator.vibrate?.(15);
+    }, 450);
+  });
+  line.addEventListener('pointermove', event => {
+    if (!lifted && Math.hypot(event.clientX - startX, event.clientY - startY) > 10) cancel();
+  });
+  line.addEventListener('pointerup', cancel);
+  line.addEventListener('pointercancel', cancel);
+}
+function dayUnder(x: number, y: number) {
+  const cell = document.elementFromPoint(x, y)?.closest<HTMLElement>('.strip button');
+  return cell?.dataset.day ? Number(cell.dataset.day) : null;
+}
+function markDrop(day: number | null) {
+  for (const cell of document.querySelectorAll<HTMLElement>('.strip button')) cell.classList.toggle('drop', Number(cell.dataset.day) === day);
+}
+document.addEventListener('pointermove', event => { if (lifted) markDrop(dayUnder(event.clientX, event.clientY)); });
+// Once a row is lifted, the finger drags it rather than scrolling the page.
+document.addEventListener('touchmove', event => { if (lifted) event.preventDefault(); }, { passive: false });
+document.addEventListener('pointerup', event => {
+  if (!lifted) return;
+  const id = lifted, day = dayUnder(event.clientX, event.clientY);
+  // Let the click that follows this release see `lifted` and leave the row closed.
+  setTimeout(() => { lifted = null; document.body.classList.remove('dragging'); markDrop(null); render(); });
+  const task = data.records[id]?.task;
+  if (day === null || !task || task.remindAt === null) return;
+  const from = new Date(task.remindAt), to = new Date(day);
+  to.setHours(from.getHours(), from.getMinutes(), 0, 0);
+  if (to.getTime() === task.remindAt) return;
+  void run(async () => {
+    await save(id, { ...task, remindAt: to.getTime() });
+    selectedDay = day;
+    status(`Moved to ${longDay(day)} · ${clock(to.getTime())}`);
+  });
+});
+
+// ── Swipe the list sideways to change day ──
+let listX: number | null = null, listY = 0;
+gutter.addEventListener('touchstart', event => { listX = event.touches[0].clientX; listY = event.touches[0].clientY; }, { passive: true });
+gutter.addEventListener('touchend', event => {
+  if (listX === null || lifted) { listX = null; return; }
+  const dx = event.changedTouches[0].clientX - listX, dy = event.changedTouches[0].clientY - listY;
+  listX = null;
+  if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy)) { selectedDay = addDays(selectedDay, dx < 0 ? 1 : -1); expanded = null; render(); }
+});
+
 // ── Strip navigation: swipe on touch, arrow keys on desktop ──
 let swipeX: number | null = null;
 $<HTMLDivElement>('#strip').addEventListener('touchstart', event => { swipeX = event.touches[0].clientX; }, { passive: true });
@@ -468,6 +527,16 @@ function openSheet(id: string | null) {
   field('title').focus();
 }
 function resetEditor() { editing = null; form.reset(); sheet.hidden = true; }
+
+// Android's back gesture asks this first (MainActivity.kt): close what is open and return true,
+// or return false to let back leave the app.
+(window as unknown as { nothingToDoBack: () => boolean }).nothingToDoBack = () => {
+  if (!settings.hidden) { closeSettings(); return true; }
+  if (!sheet.hidden) { resetEditor(); return true; }
+  if (quick.value) { quick.value = ''; quick.blur(); render(); return true; }
+  if (expanded) { expanded = null; render(); return true; }
+  return false;
+};
 $('#open-sheet').addEventListener('click', () => openSheet(null));
 field('date').addEventListener('change', () => {
   const value = field('date').value;
@@ -547,7 +616,8 @@ function syncOnReturn() {
   void wakeSync().catch(error => status(String(error)));
 }
 const closeSettings = () => { settings.hidden = true; };
-$('#open-settings').addEventListener('click', () => { settings.hidden = false; });
+const openSettings = () => { settings.hidden = false; };
+$('#open-settings').addEventListener('click', openSettings);
 $('#close-settings').addEventListener('click', closeSettings);
 settings.addEventListener('click', event => { if (event.target === settings) closeSettings(); });
 syncForm.addEventListener('submit', event => {
@@ -648,7 +718,7 @@ async function start() {
   });
   await refresh();
   // First run with nothing here yet: show where sync is set up.
-  if (!sync.connected && !sync.remembered && Object.keys(data.records).length === 0) settings.hidden = false;
+  if (!sync.connected && !sync.remembered && Object.keys(data.records).length === 0) openSettings();
   await wakeSync();
 }
 void start().catch(error => status(String(error)));

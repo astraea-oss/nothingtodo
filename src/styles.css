@@ -45,7 +45,7 @@ main { max-width: 40rem; margin: auto; min-height: 100vh; padding-bottom: calc(8
 .strip button.on .lbl { color: var(--bg); }
 
 /* Gutter list: bands, rows on a dotted rail, the NOW line */
-.gt { position: relative; }
+.gt { position: relative; min-height: calc(100vh - 14rem); } /* the rail runs down to the input bar, and the whole area takes sideways swipes */
 .gt::before { content: ''; position: absolute; left: 89px; top: 0; bottom: 0; border-left: 1.5px dotted var(--faint); }
 .gt-row, .gt-now { display: grid; grid-template-columns: 62px 22px 1fr 50px 16px; align-items: center; padding: 0 16px; }
 .gt-band { width: 100%; height: 28px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; border: 0; font: 10.5px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); background: var(--surface); position: relative; z-index: 2; }
@@ -120,3 +120,9 @@ button.node::after { content: ''; position: absolute; inset: -14px; } /* a finge
 .readout { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-radius: 22px; background: var(--bg); padding: 8px 18px; }
 .readout input { border: 0; background: none; padding: 0; font: 900 34px var(--dot); color: var(--fg); min-width: 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 2px; }
+
+/* Rescheduling: a lifted row and the strip day under the finger (deck: .strip div.drop) */
+.gt-row.lifted { outline: 1.5px dashed var(--red); outline-offset: -3px; }
+.strip button.drop { outline: 1.5px solid var(--red); outline-offset: -1.5px; }
+body.dragging { user-select: none; -webkit-user-select: none; }
+.gt-row { -webkit-touch-callout: none; }
