@@ -208,3 +208,10 @@ body.dragging { user-select: none; -webkit-user-select: none; }
 .month-head .icon { border: 0; background: none; color: var(--fg); font-size: 26px; padding: 4px 12px; }
 .month-days, .month-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
 .month-days span { text-align: center; padding-bottom: 6px; font-size: 9px; }
+
+/* Repeat tile: custom "every N units" */
+.stepper { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
+.stepper .step { width: 40px; height: 40px; border: 0; border-radius: 50%; background: var(--surface2); font: 18px var(--mono); color: var(--fg); }
+.stepper .dot.big.small { min-width: 2ch; text-align: center; }
+.pgrid button.ghost { background: none; border: 1px dashed var(--line); color: var(--dim); }
+.pgrid button.ghost.on { border-color: var(--fg); color: var(--fg); }

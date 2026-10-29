@@ -799,6 +799,8 @@ interface Draft { kind: Kind; day: number; minutes: number | null; duration: num
 let draft: Draft = { kind: 'reminder', day: startOfDay(Date.now()), minutes: null, duration: null, repeat: null, warnings: [], notes: '' };
 let openTile: string | null = null;
 let preview: number[] = [];
+// The Repeat tile's custom rule editor stays open once chosen.
+let customRepeat = false;
 const titleInput = $<HTMLInputElement>('#sheet-title');
 const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -820,7 +822,7 @@ function repeatText(r: Repeat | null): [string, string] {
   if (r.unit === 'day') return r.every === 1 ? ['Daily', ''] : [String(r.every), 'd'];
   if (r.unit === 'week') return r.every === 1 ? ['Weekly', ''] : [String(r.every), 'wk'];
   if (r.unit === 'month') return r.every === 12 ? ['Yearly', ''] : [String(r.every), 'mo'];
-  return ['Yearly', ''];
+  return r.every === 1 ? ['Yearly', ''] : [String(r.every), 'yr'];
 }
 const sameRepeat = (a: Repeat | null, b: Repeat | null) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -1022,10 +1024,35 @@ function tile(name: TileName) {
         : [['Never', null], ['8 h', { type: 'fixed', minutes: 480 }], ['Daily', cal('day', 1)], ['Weekly', cal('week', 1)], ['28 d', { type: 'fixed', minutes: 40320 }],
           ['1 mo', cal('month', 1)], ['3 mo', cal('month', 3)], ['4 mo', cal('month', 4)], ['6 mo', cal('month', 6)], ['12 mo', cal('year', 1)]];
       const current = draft.repeat?.type === 'calendar' ? { ...draft.repeat, weekdays: undefined } : draft.repeat;
-      t.append(presets(options.map(([label, r]) => [label, sameRepeat(current as Repeat | null, r), () => {
+      const isPreset = options.some(([, r]) => sameRepeat(current as Repeat | null, r));
+      const grid = presets(options.map(([label, r]) => [label, sameRepeat(current as Repeat | null, r), () => {
         if (!marker && draft.minutes === null) draft.minutes = 540;
         draft.repeat = r;
-      }])));
+        customRepeat = false;
+      }]));
+      grid.append(choice('Custom…', customRepeat || !isPreset, () => {
+        customRepeat = true;
+        if (!marker && draft.minutes === null) draft.minutes = 540;
+        if (!draft.repeat) draft.repeat = { type: 'calendar', unit: 'week', every: 2 };
+      }, 'ghost'));
+      t.append(grid);
+      // Custom: "every N units". Hours are exact intervals, the rest follow the calendar.
+      if ((customRepeat || !isPreset) && draft.repeat) {
+        const rep = draft.repeat;
+        const unit = rep.type === 'fixed' ? 'hour' : rep.unit;
+        const every = rep.type === 'fixed' ? Math.max(1, Math.round(rep.minutes / 60)) : rep.every;
+        const set = (u: string, n: number) => {
+          n = Math.max(1, Math.min(u === 'hour' ? 72 : 99, n));
+          draft.repeat = u === 'hour' ? { type: 'fixed', minutes: n * 60 } : { type: 'calendar', unit: u as 'day' | 'week' | 'month' | 'year', every: n, ...(rep.type === 'calendar' && rep.unit === u && rep.weekdays ? { weekdays: rep.weekdays } : {}) };
+        };
+        const stepper = el('div', 'stepper');
+        stepper.append(el('span', 'lbl', 'Every'), choice('−', false, () => set(unit, every - 1), 'step'), el('span', 'dot big small', String(every)), choice('+', false, () => set(unit, every + 1), 'step'));
+        const units = el('div', 'chips');
+        for (const u of [...(marker ? [] : ['hour']), 'day', 'week', 'month', 'year']) {
+          units.append(choice(`${u}${every === 1 ? '' : 's'}`, unit === u, () => set(u, every), 'pill'));
+        }
+        t.append(stepper, units);
+      }
       const r = draft.repeat;
       if (r?.type === 'calendar' && (r.unit === 'day' || r.unit === 'week')) {
         const days = r.weekdays ?? [];
@@ -1176,6 +1203,7 @@ function openSheet(id: string | null) {
   };
   titleInput.value = task?.title ?? fromBar?.title ?? '';
   openTile = null;
+  customRepeat = false;
   renderSheet();
   refreshPreview();
   sheet.hidden = false;
