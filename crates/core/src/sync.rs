@@ -54,7 +54,7 @@ impl From<Remote> for Raw {
 /// A task this version fully supports, or None for a newer schema or an invalid payload.
 fn supported(value: &serde_json::Value) -> Option<Task> {
     let task: Task = serde_json::from_value(value.clone()).ok()?;
-    (task.schema_version == SCHEMA_VERSION && task.validate().is_ok()).then_some(task)
+    ((1..=SCHEMA_VERSION).contains(&task.schema_version) && task.validate().is_ok()).then_some(task)
 }
 
 #[derive(Deserialize)]
@@ -541,6 +541,8 @@ mod tests {
             notes: "".into(),
             completed: false,
             remind_at: None,
+            kind: None,
+            date: None,
             extra: Default::default(),
         }
     }
@@ -829,7 +831,7 @@ mod tests {
             },
         )
         .unwrap();
-        let newer = serde_json::json!({ "schemaVersion": 2, "title": "Call", "kind": "alarm" });
+        let newer = serde_json::json!({ "schemaVersion": 3, "title": "Call", "kind": "alarm" });
         apply(&mut store.state, raw(&id, Some(newer.clone()), 2)).unwrap();
         let record = &store.state.records[&id];
         assert!(!record.editable() && record.version == 2);
@@ -887,7 +889,7 @@ mod tests {
             .unwrap();
         apply(
             &mut store.state,
-            raw(&id, Some(serde_json::json!({ "schemaVersion": 2 })), 2),
+            raw(&id, Some(serde_json::json!({ "schemaVersion": 3 })), 2),
         )
         .unwrap();
         let record = &store.state.records[&id];
@@ -932,5 +934,22 @@ mod tests {
         .unwrap();
         assert!(!store.state.records[&id].editable());
         assert!(store.state.records[&id].task.is_none());
+    }
+
+    #[test]
+    fn schema_2_markers_sync_as_supported_records() {
+        let mut store = Store::open(":memory:").unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let marker = serde_json::json!({
+            "schemaVersion": 2, "title": "Mum's birthday", "notes": "", "completed": false,
+            "remindAt": null, "kind": "marker", "date": "2026-12-03"
+        });
+        apply(&mut store.state, raw(&id, Some(marker), 1)).unwrap();
+        let record = &store.state.records[&id];
+        assert!(record.editable());
+        assert_eq!(
+            record.task.as_ref().unwrap().date.as_deref(),
+            Some("2026-12-03")
+        );
     }
 }

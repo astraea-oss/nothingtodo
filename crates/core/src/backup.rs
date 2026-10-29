@@ -1,6 +1,6 @@
 //! Versioned backups. Credentials live in the system keyring and are never part of a snapshot,
 //! so they are never exported. Exports are plaintext and must be kept private.
-use crate::{Record, Result, SCHEMA_VERSION, Snapshot, Store};
+use crate::{Record, Result, Snapshot, Store};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -116,10 +116,9 @@ impl Store {
             ..Default::default()
         };
         for record in backup.snapshot.records.into_values() {
-            let Some(mut task) = record.task.filter(|_| record.unsupported.is_none()) else {
+            let Some(task) = record.task.filter(|_| record.unsupported.is_none()) else {
                 continue;
             };
-            task.schema_version = SCHEMA_VERSION;
             task.validate()?;
             state.records.insert(
                 Uuid::new_v4().to_string(),
@@ -149,6 +148,8 @@ mod tests {
             notes: "".into(),
             completed: false,
             remind_at: Some(1000),
+            kind: None,
+            date: None,
             extra: Default::default(),
         }
     }

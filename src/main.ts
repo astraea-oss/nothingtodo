@@ -13,7 +13,8 @@ import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notif
 // strip with dot loads, day bands with rows on a dotted gutter rail and a red NOW line, and an
 // input bar at the bottom. Keep additions inside that structure.
 
-interface Task { schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null }
+// Schema 2 adds `kind` and, for markers, a local `date`; the core picks the schema when saving.
+interface Task { schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null; kind?: 'reminder' | 'marker' | 'alarm'; date?: string }
 interface Remote { key: string; value: Task | null; version: number; deleted: boolean }
 interface TaskRecord { task: Task | null; version: number; dirty: boolean; conflict: Remote | null; notifiedAt: number | null; localRevision: number; snooze: { of: number; until: number } | null; unsupported: { value: unknown; version: number } | null }
 interface SyncStatus {
@@ -47,8 +48,8 @@ root.innerHTML = `
         <input id="sheet-title" name="title" class="sheet-title" required maxlength="500" autocomplete="off" placeholder="What needs doing?" aria-label="Title">
         <div class="keys" role="radiogroup" aria-label="Type">
           <button type="button" class="key" disabled title="Alarms arrive with entry types"><i class="node al"></i>Alarm</button>
-          <button type="button" class="key on" aria-pressed="true"><i class="node"></i>Reminder</button>
-          <button type="button" class="key" disabled title="Markers arrive with entry types"><i class="node mk"></i>Marker</button>
+          <button type="button" class="key on" data-kind="reminder" aria-pressed="true"><i class="node"></i>Reminder</button>
+          <button type="button" class="key" data-kind="marker" aria-pressed="false"><i class="node mk"></i>Marker</button>
         </div>
         <div class="readout">
           <input name="time" type="time" class="dot" aria-label="Time">
@@ -225,6 +226,11 @@ function parse(text: string): Parsed {
   }
   return { title: kept.join(' '), day, minutes };
 }
+// Markers are local dates: midnight of that day here, whatever the time zone.
+function markerDay(record: TaskRecord) {
+  const date = record.task?.kind === 'marker' ? record.task.date : undefined;
+  return date ? new Date(`${date}T00:00`).getTime() : null;
+}
 function quickTarget(parsed: Parsed) {
   if (parsed.minutes === null) return null;
   const d = new Date(parsed.day ?? selectedDay);
@@ -248,12 +254,15 @@ function renderHeader(shownDay: number, preview: boolean) {
     const day = addDays(start, i), next = addDays(day, 1);
     const cell = el('button', day === shownDay ? 'on' : '');
     cell.type = 'button';
-    const dues = Object.values(data.records).filter(r => r.task && !r.task.completed && !r.unsupported)
-      .map(reminderAt).filter((d): d is number => d !== null && d >= day && d < next);
-    cell.setAttribute('aria-label', `${new Date(day).toDateString()}, ${dues.length} reminder${dues.length === 1 ? '' : 's'}`);
+    const open = Object.values(data.records).filter(r => r.task && !r.task.completed && !r.unsupported);
+    const dues = open.map(reminderAt).filter((d): d is number => d !== null && d >= day && d < next);
+    const marks = open.filter(r => markerDay(r) === day).length;
+    const count = dues.length + marks;
+    cell.setAttribute('aria-label', `${new Date(day).toDateString()}, ${count} entr${count === 1 ? 'y' : 'ies'}`);
     cell.setAttribute('aria-pressed', String(day === shownDay));
     const load = el('span', 'load');
-    for (const due of dues.slice(0, 4)) load.append(el('i', due <= now ? 'r' : ''));
+    const dots = [...Array(marks).fill(''), ...dues.map(due => (due <= now ? 'r' : ''))];
+    for (const dot of dots.slice(0, 4)) load.append(el('i', dot));
     cell.append(el('span', 'lbl', new Date(day).toLocaleDateString([], { weekday: 'narrow' })),
       el('b', new Date(day).getMonth() !== month ? 'dim' : '', two(new Date(day).getDate())), load);
     cell.dataset.day = String(day);
@@ -279,24 +288,27 @@ function row(id: string, record: TaskRecord, now: number, showDay = false) {
   const task = record.task;
   const readOnly = record.unsupported !== null;
   const due = reminderAt(record);
+  const marker = task?.kind === 'marker';
   const done = !!task?.completed;
   const late = !done && due !== null && due <= now;
   const line = el('div', 'gt-row');
   line.classList.toggle('open', expanded === id);
-  // The node on the rail is the checkbox.
-  const node = el('button', `node${done ? ' x' : ''}${late ? ' r' : ''}`);
+  // The node on the rail is the checkbox; markers are squares.
+  const node = el('button', `node${marker ? ' mk' : ''}${done ? ' x' : ''}${late ? ' r' : ''}`);
   node.type = 'button';
   node.disabled = readOnly || !task;
   node.setAttribute('aria-label', done ? `Reopen ${task?.title}` : `Complete ${task?.title ?? 'task'}`);
   if (task) node.addEventListener('click', event => { event.stopPropagation(); void run(() => save(id, { ...task, completed: !done })); });
-  const time = due === null ? '—' : showDay ? `${weekday(due)} ${clock(due)}` : clock(due);
+  const markedDay = markerDay(record);
+  const time = marker && markedDay !== null ? (showDay ? shortDay(markedDay) : 'all day')
+    : due === null ? '—' : showDay ? `${weekday(due)} ${clock(due)}` : clock(due);
   const title = el('span', `t${done ? ' done' : ''}`, task?.title ?? (readOnly ? 'From a newer app version' : 'Deleted on this device'));
   // Sync glyphs: synced is silent, pending a ring, conflict a red dot.
   const sy = el('span', record.conflict ? 'sy c' : record.dirty && sync.connected ? 'sy p' : 'sy');
-  line.append(el('span', `tm${late ? ' red' : done ? ' dim' : ''}`, time), node, title,
+  line.append(el('span', `tm${marker ? ' ad' : ''}${late ? ' red' : done ? ' dim' : ''}`, time), node, title,
     el('span', `n${late ? ' red' : ''}`, done ? 'done' : due !== null ? countdown(due, now) : ''), sy);
   line.addEventListener('click', () => { if (lifted) return; expanded = expanded === id ? null : id; render(); });
-  if (task && !readOnly && task.remindAt !== null) holdToMove(line, id);
+  if (task && !readOnly && (task.remindAt !== null || marker)) holdToMove(line, id);
   gutter.append(line);
   if (expanded === id || record.conflict) gutter.append(details(id, record, now));
 }
@@ -365,26 +377,35 @@ function render() {
   }
   const next = addDays(shownDay, 1);
   const dayEntries = rest.filter(([, r]) => { const d = reminderAt(r); return d !== null && d >= shownDay && d < next; });
-  const adding = target !== null && startOfDay(target) === shownDay;
-  band(shownDay === today ? 'Today' : longDay(shownDay), adding ? `${dayEntries.length} + 1` : String(dayEntries.length));
-  let drewNow = shownDay !== today;
-  let drewNew = !adding;
-  const newRow = () => {
+  // Markers sit at the top of their day as all-day rows.
+  const markers = rest.filter(([, r]) => markerDay(r) === shownDay);
+  // What Enter would add: a reminder at the typed time, otherwise a marker on the shown day.
+  const typing = !!parsed.title;
+  const adding = typing && (target === null || startOfDay(target) === shownDay);
+  const total = markers.length + dayEntries.length;
+  band(shownDay === today ? 'Today' : longDay(shownDay), adding ? `${total} + 1` : String(total));
+  const newRow = (marker: boolean) => {
     const line = el('div', 'gt-row new');
-    line.append(el('span', 'tm red', clock(target!)), el('span', 'node r'), el('span', 't', parsed.title || '…'), el('span', 'n red', 'new'), el('span'));
+    line.append(el('span', `tm red${marker ? ' ad' : ''}`, marker ? 'all day' : clock(target!)), el('span', `node r${marker ? ' mk' : ''}`),
+      el('span', 't', parsed.title), el('span', 'n red', 'new'), el('span'));
     gutter.append(line);
   };
+  if (adding && target === null) newRow(true);
+  for (const [id, r] of markers) row(id, r, now);
+  let drewNow = shownDay !== today;
+  let drewNew = !adding || target === null;
   for (const [id, r] of dayEntries) {
     const due = reminderAt(r)!;
-    if (!drewNew && target! <= due) { newRow(); drewNew = true; }
+    if (!drewNew && target! <= due) { newRow(false); drewNew = true; }
     if (!drewNow && now <= due) { nowLine(now); drewNow = true; }
     row(id, r, now);
   }
-  if (!drewNew) newRow();
+  if (!drewNew) newRow(false);
   if (!drewNow) nowLine(now);
-  if (!dayEntries.length && !adding && shownDay !== today) gutter.append(el('p', 'gt-empty lbl', 'Nothing planned'));
+  if (!total && !adding && shownDay !== today) gutter.append(el('p', 'gt-empty lbl', 'Nothing planned'));
 
-  const unscheduled = rest.filter(([, r]) => reminderAt(r) === null && !r.task!.completed);
+  // Reminders without a time, from before markers existed or saved from the sheet without one.
+  const unscheduled = rest.filter(([, r]) => reminderAt(r) === null && markerDay(r) === null && !r.task!.completed);
   if (showUnscheduled && unscheduled.length) {
     band('Unscheduled', String(unscheduled.length));
     for (const [id, r] of unscheduled) row(id, r, now);
@@ -398,9 +419,9 @@ function renderHint(parsed = parse(quick.value), target = quickTarget(parsed)) {
   const hint = $<HTMLElement>('#hint');
   if (hint.classList.contains('message')) return;
   hint.classList.toggle('red', target !== null);
-  hint.textContent = !quick.value.trim() ? '↵ add · e.g. fri 8am'
+  hint.textContent = !quick.value.trim() ? `↵ adds to ${shortDay(selectedDay)}`
     : target !== null ? `→ ${longDay(startOfDay(target))} · ${clock(target)}`
-    : '↵ adds unscheduled';
+    : `↵ adds to ${longDay(parsed.day ?? selectedDay)} · all day`;
 }
 
 // ── Input bar ──
@@ -411,10 +432,13 @@ $<HTMLFormElement>('#quick').addEventListener('submit', event => {
     const parsed = parse(quick.value);
     if (!parsed.title) { quick.focus(); return; }
     const remindAt = quickTarget(parsed);
+    const day = remindAt !== null ? startOfDay(remindAt) : parsed.day ?? selectedDay;
     quick.value = '';
-    await save(null, { schemaVersion: 1, title: parsed.title, notes: '', completed: false, remindAt });
-    if (remindAt !== null) selectedDay = startOfDay(remindAt);
-    else showUnscheduled = true;
+    // A time makes a reminder; without one it is a marker on that day.
+    await save(null, remindAt !== null
+      ? { schemaVersion: 1, title: parsed.title, notes: '', completed: false, remindAt }
+      : { schemaVersion: 2, title: parsed.title, notes: '', completed: false, remindAt: null, kind: 'marker', date: isoDate(day) });
+    selectedDay = day;
     render();
     await askForNotifications(remindAt);
   });
@@ -457,7 +481,13 @@ document.addEventListener('pointerup', event => {
   // Let the click that follows this release see `lifted` and leave the row closed.
   setTimeout(() => { lifted = null; document.body.classList.remove('dragging'); markDrop(null); render(); });
   const task = data.records[id]?.task;
-  if (day === null || !task || task.remindAt === null) return;
+  if (day === null || !task) return;
+  if (task.kind === 'marker') {
+    if (task.date === isoDate(day)) return;
+    void run(async () => { await save(id, { ...task, date: isoDate(day) }); selectedDay = day; status(`Moved to ${longDay(day)}`); });
+    return;
+  }
+  if (task.remindAt === null) return;
   const from = new Date(task.remindAt), to = new Date(day);
   to.setHours(from.getHours(), from.getMinutes(), 0, 0);
   if (to.getTime() === task.remindAt) return;
@@ -511,17 +541,33 @@ function renderChips() {
   pick.addEventListener('click', () => { const input = field('date') as HTMLInputElement; input.hidden = false; input.showPicker?.(); input.focus(); });
   chips.append(pick);
 }
+// The type keys: a reminder has a time, a marker only a day. Alarms wait for their ringing path.
+let kind: 'reminder' | 'marker' = 'reminder';
+function chooseKind(next: 'reminder' | 'marker') {
+  kind = next;
+  for (const key of document.querySelectorAll<HTMLElement>('.key[data-kind]')) {
+    key.classList.toggle('on', key.dataset.kind === next);
+    key.setAttribute('aria-pressed', String(key.dataset.kind === next));
+  }
+  ($('.readout input') as HTMLInputElement).hidden = next === 'marker';
+}
+for (const key of document.querySelectorAll<HTMLElement>('.key[data-kind]')) {
+  key.addEventListener('click', () => chooseKind(key.dataset.kind as 'reminder' | 'marker'));
+}
 function openSheet(id: string | null) {
   const fromBar = id ? null : parse(quick.value);
   editing = id;
   form.reset();
   renderChips();
-  const task = id ? data.records[id]?.task : null;
+  const record = id ? data.records[id] : null;
+  const task = record?.task ?? null;
   const at = task?.remindAt ?? (fromBar ? quickTarget(fromBar) : null);
+  const marked = record ? markerDay(record) : null;
+  chooseKind(task ? (task.kind === 'marker' ? 'marker' : 'reminder') : at !== null ? 'reminder' : 'marker');
   field('title').value = task?.title ?? fromBar?.title ?? '';
   field('notes').value = task?.notes ?? '';
   field('time').value = at !== null ? clock(at) : '';
-  chooseDay(at !== null ? startOfDay(at) : Math.max(selectedDay, startOfDay(Date.now())));
+  chooseDay(marked ?? (at !== null ? startOfDay(at) : fromBar?.day ?? Math.max(selectedDay, startOfDay(Date.now()))));
   $('#sheet-submit').textContent = id ? '↵ Save' : '↵ Add';
   sheet.hidden = false;
   field('title').focus();
@@ -548,15 +594,19 @@ form.addEventListener('submit', event => {
   event.preventDefault();
   void run(async () => {
     const time = field('time').value, date = field('date').value;
-    const remindAt = time ? new Date(`${date}T${time}`).getTime() : null;
+    const marker = kind === 'marker';
+    const remindAt = !marker && time ? new Date(`${date}T${time}`).getTime() : null;
     if (remindAt !== null && !Number.isFinite(remindAt)) throw new Error('Enter a valid date and time.');
     const existing = editing ? data.records[editing]?.task : null;
     const wasNew = !editing;
+    const { kind: _kind, date: _date, ...rest } = existing ?? {};
     await save(editing, {
-      ...existing, schemaVersion: 1, title: field('title').value, notes: field('notes').value,
+      ...rest, schemaVersion: marker ? 2 : 1, title: field('title').value, notes: field('notes').value,
       completed: existing?.completed ?? false, remindAt,
+      ...(marker ? { kind: 'marker' as const, date } : {}),
     } satisfies Task);
     if (remindAt !== null) selectedDay = startOfDay(remindAt);
+    else if (marker) selectedDay = new Date(`${date}T00:00`).getTime();
     if (wasNew) quick.value = '';
     resetEditor(); render();
     await askForNotifications(remindAt);

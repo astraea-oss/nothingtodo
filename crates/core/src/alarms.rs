@@ -158,6 +158,8 @@ mod tests {
             notes: "".into(),
             completed: false,
             remind_at,
+            kind: None,
+            date: None,
             extra: Default::default(),
         }
     }

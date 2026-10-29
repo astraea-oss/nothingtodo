@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 pub type Result<T> = std::result::Result<T, String>;
 
-/// The task schema this version writes and fully understands. Records with another schema are
-/// kept read-only (see `Record::unsupported`), because a newer schema can change behaviour, not
-/// just add display fields.
-pub const SCHEMA_VERSION: u32 = 1;
+/// The newest task schema this version understands; newer ones are kept read-only (see
+/// `Record::unsupported`), because a schema change can change behaviour, not just add display
+/// fields. 1: reminders. 2: adds entry types (roadmap 5a), so far markers.
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +28,12 @@ pub struct Task {
     pub completed: bool,
     /// UTC Unix milliseconds. None means no reminder.
     pub remind_at: Option<i64>,
+    /// Schema 2. Absent means a reminder, as every schema 1 task is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<entries::Kind>,
+    /// Schema 2 markers: a local date (`YYYY-MM-DD`) that never shifts with the time zone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
     /// Fields added by newer app versions within the same schema. They are additive by
     /// definition (a behavioural change needs a new schema version), so they are kept and sent
     /// back unchanged.
@@ -36,9 +42,42 @@ pub struct Task {
 }
 
 impl Task {
+    pub fn kind(&self) -> entries::Kind {
+        self.kind.unwrap_or(entries::Kind::Reminder)
+    }
+
+    /// The lowest schema that can hold this task. Plain reminders stay at schema 1 so clients
+    /// that only know schema 1 can keep editing them.
+    pub fn needed_schema(&self) -> u32 {
+        if self.kind() != entries::Kind::Reminder || self.date.is_some() {
+            2
+        } else {
+            1
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
-        if self.schema_version != SCHEMA_VERSION {
+        if !(1..=SCHEMA_VERSION).contains(&self.schema_version) {
             return Err("Unsupported task schema; update the app before syncing.".into());
+        }
+        if self.schema_version < self.needed_schema() {
+            return Err("This task needs task schema 2.".into());
+        }
+        match self.kind() {
+            entries::Kind::Reminder if self.date.is_some() => {
+                return Err("Reminders have a time, not a date.".into());
+            }
+            entries::Kind::Marker => {
+                let date = self.date.as_deref().ok_or("Markers need a date.")?;
+                date.parse::<jiff::civil::Date>()
+                    .map_err(|_| "Invalid marker date.")?;
+                if self.remind_at.is_some() {
+                    return Err("Markers have a date, not a time.".into());
+                }
+            }
+            // Ringing until stopped needs its own native path (roadmap 5a).
+            entries::Kind::Alarm => return Err("Alarms are not available yet.".into()),
+            _ => {}
         }
         if self.title.trim().is_empty() || self.title.len() > 500 || self.notes.len() > 8000 {
             return Err("Use a title of 1–500 bytes and notes up to 8000 bytes.".into());
@@ -199,6 +238,7 @@ impl Store {
 
     pub fn save_task(&mut self, id: Option<String>, mut task: Task) -> Result<String> {
         task.title = task.title.trim().into();
+        task.schema_version = task.needed_schema();
         task.validate()?;
         let mut state = self.snapshot();
         let id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -319,6 +359,8 @@ mod tests {
             notes: "".into(),
             completed: false,
             remind_at: Some(1000),
+            kind: None,
+            date: None,
             extra: Default::default(),
         }
     }
@@ -351,6 +393,70 @@ mod tests {
         store.delete_task(&id).unwrap();
         assert!(store.snapshot().records[&id].task.is_none());
         assert!(store.due(4000).is_empty());
+    }
+
+    #[test]
+    fn saving_picks_the_lowest_schema_and_markers_need_a_date() {
+        let mut store = Store::open(":memory:").unwrap();
+        let id = store.save_task(None, task()).unwrap();
+        assert_eq!(
+            store.snapshot().records[&id]
+                .task
+                .as_ref()
+                .unwrap()
+                .schema_version,
+            1
+        );
+
+        let mut marker = task();
+        marker.remind_at = None;
+        marker.kind = Some(entries::Kind::Marker);
+        marker.date = Some("2026-12-03".into());
+        store.save_task(Some(id.clone()), marker.clone()).unwrap();
+        let saved = store.snapshot().records[&id].task.clone().unwrap();
+        assert_eq!(saved.schema_version, 2);
+        assert_eq!(serde_json::to_value(&saved).unwrap()["kind"], "marker");
+        // Back to a plain reminder: schema 1 again, so older clients can edit it.
+        store.save_task(Some(id.clone()), task()).unwrap();
+        assert_eq!(
+            store.snapshot().records[&id]
+                .task
+                .as_ref()
+                .unwrap()
+                .schema_version,
+            1
+        );
+
+        let mut timed = marker.clone();
+        timed.remind_at = Some(5);
+        assert!(
+            store.save_task(None, timed).is_err(),
+            "markers have no time"
+        );
+        let mut undated = marker.clone();
+        undated.date = None;
+        assert!(store.save_task(None, undated).is_err());
+        let mut bad = marker.clone();
+        bad.date = Some("2026-02-30".into());
+        assert!(store.save_task(None, bad).is_err());
+        let mut alarm = task();
+        alarm.kind = Some(entries::Kind::Alarm);
+        assert!(
+            store.save_task(None, alarm).is_err(),
+            "alarms wait for their ringing path"
+        );
+        // A schema 1 payload cannot smuggle in schema 2 fields.
+        let mut sneaky = marker;
+        sneaky.schema_version = 1;
+        assert!(sneaky.validate().is_err());
+        // Markers are never scheduled as notifications on their day.
+        assert!(
+            store
+                .alarms(0)
+                .unwrap()
+                .iter()
+                .all(|a| a.task_id != id || a.at != 0)
+        );
     }
 
     #[test]

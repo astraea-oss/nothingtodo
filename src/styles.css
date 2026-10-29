@@ -53,6 +53,8 @@ main { max-width: 40rem; margin: auto; min-height: 100vh; padding-bottom: calc(8
 button.gt-band { cursor: pointer; text-align: left; }
 .gt-row { min-height: 44px; border-bottom: 1px dotted var(--line); font-size: 15px; position: relative; cursor: pointer; }
 .gt-row .tm { font: 12.5px var(--mono); }
+.gt-row .tm.ad { font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); } /* deck: all-day markers */
+.readout input[hidden] { display: none; }
 .gt-row .t { padding-left: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gt-row.open .t { white-space: normal; overflow-wrap: anywhere; padding-block: 10px; }
 .gt-row .t.done { color: var(--dim); text-decoration: line-through; text-decoration-color: var(--faint); }

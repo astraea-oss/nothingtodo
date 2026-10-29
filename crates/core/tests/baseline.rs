@@ -14,6 +14,8 @@ fn task(i: usize) -> Task {
         notes: "A line or two of notes, as most tasks have.".into(),
         completed: i.is_multiple_of(3),
         remind_at: Some(1_900_000_000_000 + i as i64 * 60_000),
+        kind: None,
+        date: None,
         extra: Default::default(),
     }
 }

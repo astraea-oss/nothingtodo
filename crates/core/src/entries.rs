@@ -1,9 +1,9 @@
 //! Entry types, recurrence and warnings (roadmap 5a), as task schema 2.
 //!
-//! First pass: the data model and the occurrence engine, with the time semantics fixed by the
-//! roadmap. Nothing writes schema 2 yet. The rollout rule in 0b requires a published release that
-//! keeps schema 2 records read-only (it already does, see `Record::unsupported`) before any device
-//! writes them; `WRITES_ENABLED` stays false until then.
+//! Schema 2 tasks already carry `kind` and a marker `date` (see `Task`). This module holds the
+//! fuller model and the occurrence engine for repeats and warnings, with the time semantics fixed
+//! by the roadmap; those are not stored yet, so `WRITES_ENABLED` (repeats and warnings) stays
+//! false until they are wired into `Task`, the alarm list and the UI.
 //!
 //! Time semantics:
 //! - Alarms and reminders happen at an instant. A one-off keeps that instant when travelling.
@@ -24,8 +24,7 @@ use jiff::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Flip only after a release that reads schema 2 records as read-only is the published minimum
-/// supported client.
+/// Repeats and warnings are not stored yet; see the module notes.
 pub const WRITES_ENABLED: bool = false;
 pub const SCHEMA: u32 = 2;
 
