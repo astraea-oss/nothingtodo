@@ -1,6 +1,7 @@
 //! Platform-independent task storage and Astraea Sync protocol.
 pub mod alarms;
 pub mod backup;
+pub mod identity;
 pub mod migrations;
 pub mod schedule;
 pub mod sync;
@@ -140,6 +141,9 @@ pub struct Snapshot {
     /// Kept so the cursor can advance past them; never uploaded or shown.
     #[serde(default)]
     pub foreign: BTreeMap<String, Opaque>,
+    /// The sync account this profile belongs to, from its identity marker (see `identity`).
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 pub struct Store {

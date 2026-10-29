@@ -106,6 +106,12 @@ Acceptance: deterministic tests cover edits during slow writes, lost acknowledge
 
 ### 2. Protected credentials, account migration and encryption decision
 
+Current state (2026-10-29): account identity is implemented (`crates/core/src/identity.rs`). After a full replay with a profile's original, verified credentials, the first device creates an `account` marker (a random ID) with `baseVersion: 0`; others adopt it, and each profile records the ID. A different token for an identified profile is accepted only if the marker it can read carries the same ID, checked before anything is downloaded, so token rotation and per-device tokens work and wrong-account tokens are refused with nothing downloaded or uploaded. A missing, deleted, changed or malformed marker pauses uploads with an explanation; there is no automatic rebinding. A profile that never recorded an account cannot change tokens until it has connected once with its original token. Covered by core tests and a backend contract test with two accounts and a rotated token. The marker is a non-task record, so this relies on the 0b rollout rule: every device must run a build with the compatibility handling before one creates it.
+
+**Encryption at rest: deferred for the first release (accepted 2026-10-29 as proposed in 0a).** Threat model: the database and backups are protected by the operating system's user account and, on Android, app sandboxing and device encryption; they do not resist someone with access to the unlocked user session, root, or a copied file. Tokens are never in the database or backups (keyring, Keystore). The app and README must say plainly that tasks and exports are stored unencrypted. Revisit with SQLCipher or a Keystore/portal-wrapped key if tasks are expected to hold sensitive data; that would be a numbered migration with its own key-loss recovery rules.
+
+**Unavailable or invalidated keys:** if the keyring or a Keystore key cannot be read (locked keyring, a key invalidated after a lock-screen change, an unreadable entry), the app reports it and offers a session-only connection; tasks stay local and safe, and reconnecting stores fresh credentials.
+
 Current state: the Linux Secret Service adapter with a session-only fallback is implemented and checked against GNOME Keyring. Android uses `android-native-keyring-store` (SharedPreferences encrypted with a Keystore AES key), checked on an API 36 emulator across restarts and an upgrade install. Key invalidation handling, the Flatpak portal, account identity/migration and the encryption decision remain open.
 
 

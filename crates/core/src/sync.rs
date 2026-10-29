@@ -1,3 +1,4 @@
+use crate::identity::{self, MARKER_KEY, Next};
 use crate::{Opaque, Remote, Result, SCHEMA_VERSION, Snapshot, Store, Task};
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
@@ -153,9 +154,98 @@ impl SyncClient {
             .map_err(|_| "Invalid sync URL.".into())
     }
 
+    /// The account ID in this connection's identity marker, or None if there is none.
+    async fn fetch_marker(&self) -> Result<Option<String>> {
+        let response = self
+            .client
+            .get(self.url(&format!("settings/{MARKER_KEY}"))?)
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|_| "Sync connection failed. Local changes are safe.")?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let setting: Setting = checked(response)?
+            .json()
+            .await
+            .map_err(|_| "Invalid identity response.")?;
+        Ok(identity::marker_id(Some(&Opaque {
+            value: setting.setting.value,
+            version: setting.setting.version,
+        })))
+    }
+
+    /// A different token or server for an existing profile: accept it only if it reaches the
+    /// account the profile recorded, before applying anything from it.
+    async fn verify_new_binding(&self, store: &Mutex<Store>) -> Result<()> {
+        let changed = {
+            let store = store.lock().await;
+            self.live()?;
+            store
+                .state
+                .binding
+                .as_ref()
+                .is_some_and(|b| b != &self.binding)
+        };
+        if !changed {
+            return Ok(());
+        }
+        let marker = self.fetch_marker().await?;
+        let mut store = store.lock().await;
+        self.live()?;
+        store.rebind(&self.binding, marker)
+    }
+
+    /// After a full replay with verified credentials: confirm the account, creating its marker if
+    /// no device has yet. Concurrent creators race on `baseVersion: 0`; the loser adopts the
+    /// winner's marker.
+    async fn confirm_account(&self, store: &Mutex<Store>) -> Result<()> {
+        let next = {
+            let mut store = store.lock().await;
+            self.live()?;
+            store.check_account()?
+        };
+        if let Next::Ready = next {
+            return Ok(());
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let body = serde_json::json!({ "baseVersion": 0, "value": identity::marker_value(&id) });
+        let response = self
+            .client
+            .put(self.url(&format!("settings/{MARKER_KEY}"))?)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| "Sync connection failed. Local changes are safe.")?;
+        let marker = if response.status() == StatusCode::CONFLICT {
+            let conflict: Conflict = response
+                .json()
+                .await
+                .map_err(|_| "Invalid conflict response.")?;
+            conflict
+                .current
+                .ok_or("Identity marker missing after a conflict.")?
+        } else {
+            let setting: Setting = checked(response)?
+                .json()
+                .await
+                .map_err(|_| "Invalid write response.")?;
+            setting.setting
+        };
+        let mut store = store.lock().await;
+        self.live()?;
+        let mut state = store.snapshot();
+        apply(&mut state, marker)?;
+        store.commit(state)?;
+        store.check_account().map(|_| ())
+    }
+
     /// The store lock is held only to read or commit state, never across a network request.
     /// Network attempts must still be serialized by the caller.
     pub async fn sync(&self, store: &Mutex<Store>) -> Result<Outcome> {
+        self.verify_new_binding(store).await?;
         // Pull first; persist each applied page and its cursor together.
         let mut pages = 0;
         loop {
@@ -190,6 +280,7 @@ impl SyncClient {
                 break;
             }
         }
+        self.confirm_account(store).await?;
         let uploads = {
             let mut store = store.lock().await;
             self.live()?;
@@ -244,7 +335,7 @@ impl SyncClient {
 impl Store {
     fn check_binding(&self, binding: &str) -> Result<()> {
         if self.state.binding.as_ref().is_some_and(|b| b != binding) {
-            return Err("This local profile is bound to another token or server. Use the original credentials; account migration is not implemented yet.".into());
+            return Err("This local profile is bound to another token or server, and that token's account could not be confirmed. Nothing was downloaded or uploaded.".into());
         }
         Ok(())
     }

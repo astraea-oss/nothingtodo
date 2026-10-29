@@ -32,9 +32,14 @@ try {
   }
   const now = new Date().toISOString();
   await db.prepare('INSERT INTO accounts VALUES (?, ?, ?)').bind('test-account', 'NothingToDo test', now).run();
-  // Public test fixture token, valid only in this throwaway database.
-  const hash = createHash('sha256').update(`as_${'a'.repeat(43)}`).digest('hex');
-  await db.prepare('INSERT INTO api_tokens(token_hash, account_id, created_at) VALUES (?, ?, ?)').bind(hash, 'test-account', now).run();
+  // Public test fixture tokens, valid only in this throwaway database: `a` for the main contract
+  // test, `d` and `e` for two tokens of one identity-test account, `b` for an unrelated account.
+  await db.prepare('INSERT INTO accounts VALUES (?, ?, ?)').bind('identity-account', 'Identity test', now).run();
+  await db.prepare('INSERT INTO accounts VALUES (?, ?, ?)').bind('other-account', 'Other test', now).run();
+  for (const [letter, account] of [['a', 'test-account'], ['d', 'identity-account'], ['e', 'identity-account'], ['b', 'other-account']]) {
+    const hash = createHash('sha256').update(`as_${letter.repeat(43)}`).digest('hex');
+    await db.prepare('INSERT INTO api_tokens(token_hash, account_id, created_at) VALUES (?, ?, ?)').bind(hash, account, now).run();
+  }
   const url = await mf.ready;
   const test = baseline
     ? ['test', '--release', '-p', 'nothingtodo-core', '--test', 'baseline', '--', '--ignored', '--nocapture', '--test-threads=1']

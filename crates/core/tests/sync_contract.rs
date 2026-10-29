@@ -138,3 +138,73 @@ async fn two_devices_conflicts_deletion_pagination_and_offline_retry() {
     assert!(unbound.binding.is_none());
     assert!(unbound.records[&pending].dirty);
 }
+
+#[tokio::test]
+#[ignore = "requires scripts/test-sync.mjs and a local Astraea checkout"]
+async fn account_identity_allows_rotation_and_refuses_other_accounts() {
+    let endpoint = std::env::var("NOTHINGTODO_TEST_API").expect("local test API");
+    assert!(endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("http://localhost:"));
+    let token = |letter: &str| format!("as_{}", letter.repeat(43));
+    let original = SyncClient::new(&endpoint, token("d")).unwrap();
+    let (a, b) = (store(), store());
+    a.lock().await.save_task(None, task("Identity")).unwrap();
+    sync(&original, &a).await.unwrap();
+    sync(&original, &b).await.unwrap();
+    let account = a.lock().await.account().map(String::from);
+    assert!(account.is_some());
+    assert_eq!(
+        b.lock().await.account(),
+        account.as_deref(),
+        "second device adopts the marker"
+    );
+
+    // Another token for the same account: accepted, and uploads continue.
+    let rotated = SyncClient::new(&endpoint, token("e")).unwrap();
+    let id = a
+        .lock()
+        .await
+        .save_task(None, task("After rotation"))
+        .unwrap();
+    sync(&rotated, &a).await.unwrap();
+    assert!(!a.lock().await.snapshot().records[&id].dirty);
+
+    // A token for a different account: refused before anything is downloaded or uploaded.
+    let pending = a
+        .lock()
+        .await
+        .save_task(None, task("Must stay local"))
+        .unwrap();
+    let before = a.lock().await.snapshot();
+    let other = SyncClient::new(&endpoint, token("b")).unwrap();
+    assert!(sync(&other, &a).await.is_err());
+    let after = a.lock().await.snapshot();
+    assert_eq!(
+        (after.cursor, after.binding),
+        (before.cursor, before.binding)
+    );
+    assert!(after.records[&pending].dirty);
+
+    // The marker deleted on the server: uploads pause rather than rebind.
+    let marker_url = format!("{endpoint}/v1/apps/nothingtodo/settings/account");
+    let http = reqwest::Client::new();
+    let current: serde_json::Value = http
+        .get(&marker_url)
+        .bearer_auth(token("d"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let version = current["setting"]["version"].as_u64().unwrap();
+    let deleted = http
+        .delete(&marker_url)
+        .bearer_auth(token("d"))
+        .json(&serde_json::json!({ "baseVersion": version }))
+        .send()
+        .await
+        .unwrap();
+    assert!(deleted.status().is_success());
+    assert!(sync(&rotated, &a).await.is_err());
+    assert!(a.lock().await.snapshot().records[&pending].dirty);
+}
