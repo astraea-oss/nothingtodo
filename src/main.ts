@@ -39,6 +39,7 @@ root.innerHTML = `
     </nav>
     <div class="list-header">
       <p id="list-label" class="label"></p>
+      <input id="search" type="search" placeholder="Search" aria-label="Search titles and notes (press /)" autocomplete="off">
       <select id="filter" aria-label="Show"><option value="active">Upcoming</option><option value="all">All</option><option value="completed">Done</option></select>
     </div>
     <div id="tasks"></div>
@@ -344,7 +345,9 @@ function render() {
   const entries = (Object.entries(data.records) as Entry[]).sort(byTime);
   // Conflicts and records from newer versions always show, whatever the filter.
   const attention = entries.filter(([, r]) => r.conflict || (r.unsupported && !r.task));
-  const shown = entries.filter(e => !attention.includes(e) && e[1].task &&
+  const query = search.value.trim().toLowerCase();
+  const matches = (task: Task) => !query || task.title.toLowerCase().includes(query) || task.notes.toLowerCase().includes(query);
+  const shown = entries.filter(e => !attention.includes(e) && e[1].task && matches(e[1].task) &&
     (view === 'all' || (view === 'completed') === e[1].task.completed));
   if (attention.length) group('Needs attention', attention, now, { className: 'attention' });
   if (view === 'active') {
@@ -355,16 +358,18 @@ function render() {
   const days = new Map<number, Entry[]>();
   for (const entry of timed) {
     const day = startOfDay(reminderAt(entry[1])!);
-    if (view === 'active' && day < selectedDay) continue;
+    // Searching looks across every day, not just from the selected one.
+    if (view === 'active' && !query && day < selectedDay) continue;
     days.set(day, [...(days.get(day) ?? []), entry]);
   }
-  if (view === 'active' && !days.has(selectedDay)) days.set(selectedDay, []);
+  if (view === 'active' && !query && !days.has(selectedDay)) days.set(selectedDay, []);
   for (const day of [...days.keys()].sort((a, b) => a - b)) {
     group(dayName(day), days.get(day)!, now, { id: `day-${day}`, className: day === selectedDay ? 'selected' : '', empty: 'Nothing planned.' });
   }
   const untimed = shown.filter(e => reminderAt(e[1]) === null);
   if (untimed.length) group('No time', untimed, now);
-  $('#list-label').textContent = view === 'active' ? `From ${dayName(selectedDay).toLowerCase()}` : view === 'all' ? 'Everything' : 'Done';
+  $('#list-label').textContent = query ? 'Matches' : view === 'active' ? `From ${dayName(selectedDay).toLowerCase()}` : view === 'all' ? 'Everything' : 'Done';
+  if (query && !shown.length) list.append(el('p', 'nothing', `Nothing matches “${search.value.trim()}”.`));
   $<HTMLElement>('#empty').hidden = entries.some(e => e[1].task || e[1].conflict || e[1].unsupported);
   const records = Object.values(data.records);
   const pending = records.filter(r => r.dirty).length, conflicts = records.filter(r => r.conflict).length;
@@ -426,7 +431,20 @@ field('date').addEventListener('change', () => {
   if (value) chooseDay(startOfDay(new Date(`${value}T00:00`).getTime()));
 });
 sheet.addEventListener('click', event => { if (event.target === sheet) resetEditor(); });
-document.addEventListener('keydown', event => { if (event.key === 'Escape' && !sheet.hidden) resetEditor(); });
+const search = $<HTMLInputElement>('#search');
+search.addEventListener('input', render);
+// Keyboard: n adds, / searches, Escape closes the sheet or clears the search.
+document.addEventListener('keydown', event => {
+  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement;
+  if (event.key === 'Escape') {
+    if (!sheet.hidden) resetEditor();
+    else if (search.value) { search.value = ''; render(); search.blur(); }
+    return;
+  }
+  if (typing || event.ctrlKey || event.metaKey || event.altKey || !sheet.hidden) return;
+  if (event.key === 'n') { event.preventDefault(); openSheet(null); }
+  if (event.key === '/') { event.preventDefault(); search.focus(); }
+});
 $('#week-back').addEventListener('click', () => { selectedDay = addDays(selectedDay, -7); render(); });
 $('#week-next').addEventListener('click', () => { selectedDay = addDays(selectedDay, 7); render(); });
 

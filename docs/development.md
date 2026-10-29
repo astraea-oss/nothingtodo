@@ -95,7 +95,7 @@ Acceptance: test migration failure and previous-binary downgrade/write rejection
 
 ### 1. Responsive sync and worker correctness
 
-Current state: the lock release, revision-checked acknowledgements, bounded replay passes and session cancellation are implemented with core and backend contract tests. Not yet done: native worker/frontend tests and a measured comparison with the 0a baseline.
+Current state: the lock release, revision-checked acknowledgements, bounded replay passes and session cancellation are implemented with core and backend contract tests. The 0a baseline was taken after this fix (saves stay in milliseconds at 5,000 tasks, replay is bounded per pass). Not yet done: automated tests of the native worker and the frontend's busy/status behaviour; they are exercised by hand on the emulator and Linux.
 
 
 Start after the migration/local-revision prerequisite in 0b; do not wait for protected credentials or account marker design. Never hold the store mutex across HTTP calls or the sync-client mutex for an entire attempt. Capture request state, release locks, perform I/O, then commit with revision checks so acknowledgements cannot overwrite concurrent edits. Keep each applied page and its cursor atomic and keep network attempts serialized. Credential replacement must isolate or invalidate responses from the previous session.
@@ -154,6 +154,8 @@ Acceptance: prove the native storage ownership strategy with foreground/action o
 
 ### 3b. Optional Android background network sync checkpoint
 
+**Decision (2026-10-29): not in the first release.** Background network sync would have to run the Rust store and sync client inside an Android background job with no activity, coordinated with a foreground process on the same database; today the store has a single writer per process and notification actions avoid the database entirely (3a). That is a substantial native project for a best-effort benefit: periodic work runs at most every 15 minutes and may be delayed. Shipped behaviour instead: cross-device changes are learned when the app is opened or brought to the front, and every 30 seconds while it is open; Android reminders and their Complete/Snooze buttons work with the app closed, and completions sync the next time the app runs. A phone that has not synced can still fire a reminder completed elsewhere. To revisit: prove a WorkManager job can open the store and keystore credentials without the webview and coordinate with the foreground (likely a per-record or outbox storage change from milestone 4), then measure on a device.
+
 Extend the mandatory native execution/storage foundation accepted in 3a to periodic network work. Before committing to an adapter, prove a background job can obtain protected credentials, perform sync and reconcile OS schedules without a webview, using the same storage ownership strategy as foreground code and notification actions. Test credential/session changes and foreground/action/job overlap. Making this network feature optional does not make cold-process action handling or safe native storage coordination optional.
 
 Periodic WorkManager work has a [15-minute minimum and can be delayed](https://developer.android.com/reference/androidx/work/PeriodicWorkRequest); it cannot provide the active-process 30-second interval. Completion elsewhere cancels an alarm only after the phone learns the change. Offline devices can still fire stale alarms, even with protected credentials and background sync. Decide whether best-effort background sync ships in the first release based on this checkpoint, and disclose the supported behavior; local alarm delivery must not depend on connectivity.
@@ -161,6 +163,18 @@ Periodic WorkManager work has a [15-minute minimum and can be delayed](https://d
 Acceptance: demonstrate foreground/background overlap, concurrent edits, credential replacement, key unavailability, worker/process restart and multi-page replay without data loss, stale uploads or a locked-out foreground app. Reconcile schedules after successful background changes. Record actual device constraints and failure behavior rather than assuming a Rust timer survives Android suspension.
 
 ### First release boundary
+
+**Checklist (2026-10-29):**
+
+| Gate | State |
+|---|---|
+| Safe persistence and recovery | Done: numbered migrations with downgrade guard (0b), versioned backup export, restore and copy. |
+| Compatible sync and rollout rules | Done: unknown fields kept, newer schemas read-only, foreign records kept (0b); account identity marker (2). This release is the minimum supported client for schema 2 and markers. |
+| Responsive editing | Done: no lock across requests (1); baseline and budgets recorded (0a). Rerun the baseline on a phone. |
+| Protected credentials | Done: Secret Service, Android Keystore, session-only fallback (2). |
+| Device-tested one-shot reminders with Complete/Snooze | Android: emulator-tested with the process killed and after reboot; real phone tested for delivery. Linux: in-process from the tray. Still to do: Complete/Snooze on the real phone, timezone change on a device. |
+| Documented behaviour | Missed reminders show as overdue; one-shot reminders are fixed instants; data and exports are unencrypted; stale cross-device reminders are possible; background sync is not included (3b). |
+| Packaging | Linux portable tarball and install script; Android APK. Still to do: a release signing key, app icon and branding (the Tauri default icon is still used), and a version number for the release. |
 
 Ship after the relevant checkpoints above demonstrate safe persistence/recovery, compatible sync and rollout rules, responsive editing, protected credentials (with an explicit session-only fallback), and device-tested one-shot reminders with Complete/Snooze actions. Document missed reminders, fixed-instant timezone behavior, encryption status and stale cross-device alarms. Finish initial-channel packaging, branding/icons, a release signing key, and release validation here; styling need not wait for the later work below.
 
@@ -179,6 +193,8 @@ Monitor tombstone and server-history growth; local pruning needs a safe strategy
 Acceptance: justify normalization with measurements or a specific capability requirement; migrate pending edits, conflicts and opaque records without loss; demonstrate the intended performance benefit. If merging is added, test independent changes and true clashes against retained bases, including deletion and mixed-version data. These are separate deliverables and need not ship together.
 
 ### 5. Later product features
+
+Current state (2026-10-29): search (titles and notes, across all days) and keyboard shortcuts (`n` adds, `/` searches, Escape closes the sheet or clears the search) are implemented. Recurrence and standalone alarms are 5a. Lists/tags need a schema change and follow the same rollout rule, so they wait for schema 2 writes.
 
 Add recurring reminders, standalone alarms, lists/tags, search and keyboard shortcuts incrementally. Specify recurrence timezone/DST behavior, completion and local snooze interaction first. Use explicit compatibility/schema capabilities from 0b; optional fields alone do not make changed behavior safe for older clients. Apply the rollout gate before introducing new record types or incompatible writes.
 

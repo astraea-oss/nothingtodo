@@ -1,8 +1,10 @@
 # NothingToDo
 
-A local-first todo and reminder app for **Linux and Android**, built with Tauri 2 and Rust. The TypeScript UI is deliberately plain, with styling in `src/styles.css`.
+A local-first todo and reminder app for **Linux and Android**, built with Tauri 2 and Rust. The TypeScript UI follows the agreed design in [docs/design/ui-directions.html](docs/design/ui-directions.html): a week strip, day-grouped rows and a short add sheet, with styling in `src/styles.css` and bundled OFL fonts (licences in `public/licenses`).
 
-Implemented: create/edit/complete/delete tasks, optional reminder dates, ten-minute snooze that stays on the device (other devices keep the original time), SQLite persistence with numbered migrations, automatic Astraea Sync that never blocks editing on the network, credentials remembered in the Linux system keyring or Android Keystore, pending offline changes, and explicit local/server conflict choices.
+Implemented: create/edit/complete/delete tasks with optional reminder times, search (`/`) and a quick add shortcut (`n`), a ten-minute snooze that stays on the device, SQLite persistence with numbered migrations, versioned backups (export, restore, or copy into another profile), automatic Astraea Sync that never blocks editing, an account identity check so a token for the wrong account can never upload, credentials remembered in the Linux system keyring or Android Keystore, pending offline changes, explicit local/server conflict choices, and read-only handling of records written by newer versions.
+
+**Tasks and backups are stored unencrypted**, protected by your operating-system account (and on Android, app sandboxing and device encryption). Sync tokens are never in the database or backups.
 
 **On Android, reminders are scheduled with the system** and fire with the app closed and after a reboot. **On Linux they need the app running:** closing the window keeps it in the tray so reminders still fire; **Quit** in the tray menu stops them. Reminders already past when a device learns about them (after a first sync, or with the app closed for a while) show as overdue rather than all notifying at once. A device that has not yet synced a completion elsewhere can still fire an outdated reminder. Android notifications have **Complete** and **Snooze 10 min** buttons that work with the app closed; a completion syncs the next time the app runs. Native local reminders and Android background synchronization have separate checkpoints; see the [roadmap](docs/development.md#roadmap).
 
