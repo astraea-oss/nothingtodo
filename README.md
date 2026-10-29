@@ -76,10 +76,12 @@ npm run build
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p nothingtodo-core
+npm run check:licences        # every shipped dependency on a GPL-3.0-or-later-compatible allowlist
 npm run test:sync -- ../astraea-sync
+npm run baseline              # performance baseline against the same throwaway backend
 ```
 
-`test:sync` needs the backend's npm dependencies installed. It bundles the backend with Wrangler's **dry-run**, starts an ephemeral local Miniflare/D1 instance, and tests the real HTTP contract with disposable fixture credentials. It never deploys or uses production credentials. Coverage includes two-device conflicts, deletion, pagination beyond 100 changes and authorization failure retention. CI runs the standalone checks and Linux build; the private sibling backend integration is run locally.
+`test:sync` needs the backend's npm dependencies installed. It bundles the backend with Wrangler's **dry-run**, starts an ephemeral local Miniflare/D1 instance, and tests the real HTTP contract with disposable fixture credentials. It never deploys or uses production credentials. Coverage includes two-device conflicts, deletion, pagination beyond 100 changes, authorization failure retention, and account identity (marker adoption, token rotation, refusing another account, a deleted marker). CI runs the standalone checks, the licence check, the Linux build and an Android debug build; the private sibling backend integration is run locally.
 
 ## Roadmap and data recovery
 
