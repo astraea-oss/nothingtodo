@@ -150,6 +150,11 @@ mod tests {
             remind_at: Some(1000),
             kind: None,
             date: None,
+            duration_minutes: None,
+            repeat: None,
+            repeat_from: None,
+            time_zone: None,
+            warnings: vec![],
             extra: Default::default(),
         }
     }

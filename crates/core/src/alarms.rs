@@ -19,6 +19,31 @@ pub struct Alarm {
     /// recognised.
     pub remind_at: i64,
     pub title: String,
+    /// A warning before the entry rather than the entry itself; it has no Complete or Snooze.
+    pub warning: bool,
+}
+
+struct Planned {
+    key: String,
+    task_id: String,
+    at: i64,
+    remind_at: i64,
+    title: String,
+    warning: bool,
+}
+
+/// "45 min", "2 h", "1 day", "1 week" for warning texts.
+fn span(minutes: u32) -> String {
+    match minutes {
+        m if m % (7 * 1440) == 0 => plural(m / (7 * 1440), "week"),
+        m if m % 1440 == 0 => plural(m / 1440, "day"),
+        m if m % 60 == 0 => format!("{} h", m / 60),
+        m => format!("{m} min"),
+    }
+}
+
+fn plural(n: u32, unit: &str) -> String {
+    format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
 /// A button pressed on a reminder notification, recorded by the OS side while the app may not
@@ -59,31 +84,77 @@ impl NotificationIds {
 }
 
 impl Store {
-    /// Active reminders still in the future, soonest first. Past reminders are not scheduled: they
-    /// show as overdue instead, so a first sync or a long absence cannot cause a burst of
-    /// notifications. Assigns notification IDs as needed and drops those of finished tasks.
-    pub fn alarms(&mut self, now: i64) -> Result<Vec<Alarm>> {
-        let mut upcoming: Vec<(i64, &String, i64, &str)> = self
-            .state
-            .records
-            .iter()
+    /// Every notification the active tasks want, in any order: each reminder at its time (or a
+    /// later local snooze) and each warning before it. Markers notify only through warnings,
+    /// counted back from 09:00 on their day. `key` identifies the notification across rebuilds.
+    fn planned(&self) -> Vec<Planned> {
+        let mut out = Vec::new();
+        for (id, record) in &self.state.records {
             // A newer schema may schedule differently; leave it to the app that understands it.
-            .filter(|(_, record)| record.editable())
-            .filter_map(|(id, record)| {
-                let task = record.task.as_ref().filter(|task| !task.completed)?;
-                let at = record.reminder_at().filter(|&at| at > now)?;
-                Some((at, id, task.remind_at?, task.title.as_str()))
-            })
-            .collect();
-        upcoming.sort();
-        upcoming.truncate(MAX_SCHEDULED);
-        let upcoming: Vec<(i64, String, i64, String)> = upcoming
+            let Some(task) = record
+                .task
+                .as_ref()
+                .filter(|t| !t.completed && record.editable())
+            else {
+                continue;
+            };
+            let marker = task.kind() == crate::entries::Kind::Marker;
+            if !marker && let (Some(at), Some(remind_at)) = (record.reminder_at(), task.remind_at) {
+                out.push(Planned {
+                    key: id.clone(),
+                    task_id: id.clone(),
+                    at,
+                    remind_at,
+                    title: task.title.clone(),
+                    warning: false,
+                });
+            }
+            let Ok(Some(base)) = task.warn_base() else {
+                continue;
+            };
+            for (i, &minutes) in task.warnings.iter().enumerate() {
+                let label = if marker && minutes == 0 {
+                    "today".to_string()
+                } else {
+                    format!("in {}", span(minutes))
+                };
+                out.push(Planned {
+                    key: format!("{id}/{i}"),
+                    task_id: id.clone(),
+                    at: base - i64::from(minutes) * 60_000,
+                    remind_at: task.remind_at.unwrap_or(base),
+                    title: format!("{} · {label}", task.title),
+                    warning: true,
+                });
+            }
+        }
+        out
+    }
+
+    /// Warnings whose time falls in `(from, to]`, for desktop delivery from the running app.
+    pub fn warnings_between(&self, from: i64, to: i64) -> Vec<(String, String)> {
+        let mut due: Vec<_> = self
+            .planned()
             .into_iter()
-            .map(|(at, id, remind_at, title)| (at, id.clone(), remind_at, title.into()))
+            .filter(|p| p.warning && p.at > from && p.at <= to)
             .collect();
+        due.sort_by_key(|p| p.at);
+        due.into_iter().map(|p| (p.task_id, p.title)).collect()
+    }
+
+    /// Notifications still in the future, soonest first and capped at `MAX_SCHEDULED`. Past ones
+    /// are not scheduled: they show as overdue instead, so a first sync or a long absence cannot
+    /// cause a burst of notifications. Assigns notification IDs as needed and drops those of
+    /// finished tasks.
+    pub fn alarms(&mut self, now: i64) -> Result<Vec<Alarm>> {
+        let mut upcoming: Vec<Planned> =
+            self.planned().into_iter().filter(|p| p.at > now).collect();
+        upcoming.sort_by(|a, b| (a.at, &a.key).cmp(&(b.at, &b.key)));
+        upcoming.truncate(MAX_SCHEDULED);
 
         let mut ids = self.state.notification_ids.clone();
-        ids.assigned.retain(|task_id, _| {
+        ids.assigned.retain(|key, _| {
+            let task_id = key.split('/').next().unwrap_or(key);
             self.state
                 .records
                 .get(task_id)
@@ -91,12 +162,13 @@ impl Store {
         });
         let alarms = upcoming
             .into_iter()
-            .map(|(at, task_id, remind_at, title)| Alarm {
-                notification_id: ids.assign(&task_id),
-                task_id,
-                at,
-                remind_at,
-                title,
+            .map(|p| Alarm {
+                notification_id: ids.assign(&p.key),
+                task_id: p.task_id,
+                at: p.at,
+                remind_at: p.remind_at,
+                title: p.title,
+                warning: p.warning,
             })
             .collect();
         if ids != self.state.notification_ids {
@@ -160,6 +232,11 @@ mod tests {
             remind_at,
             kind: None,
             date: None,
+            duration_minutes: None,
+            repeat: None,
+            repeat_from: None,
+            time_zone: None,
+            warnings: vec![],
             extra: Default::default(),
         }
     }

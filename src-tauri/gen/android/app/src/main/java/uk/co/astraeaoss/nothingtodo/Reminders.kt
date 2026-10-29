@@ -44,15 +44,18 @@ object Reminders {
   private const val ACTION_COMPLETE = "uk.co.astraeaoss.nothingtodo.COMPLETE"
   private const val ACTION_SNOOZE = "uk.co.astraeaoss.nothingtodo.SNOOZE"
 
-  /** `remindAt` is the synced reminder time; `at` can be later after a snooze. */
-  data class Reminder(val id: Int, val at: Long, val title: String, val taskId: String, val remindAt: Long) {
+  /**
+   * `remindAt` is the synced reminder time; `at` can be later after a snooze. A `warning` comes
+   * before the entry and has no Complete or Snooze buttons.
+   */
+  data class Reminder(val id: Int, val at: Long, val title: String, val taskId: String, val remindAt: Long, val warning: Boolean = false) {
     fun toJson(): JSONObject = JSONObject()
-      .put("id", id).put("at", at).put("title", title).put("taskId", taskId).put("remindAt", remindAt)
+      .put("id", id).put("at", at).put("title", title).put("taskId", taskId).put("remindAt", remindAt).put("warning", warning)
 
     companion object {
       fun fromJson(json: JSONObject) = Reminder(
         json.getInt("id"), json.getLong("at"), json.getString("title"),
-        json.getString("taskId"), json.getLong("remindAt")
+        json.getString("taskId"), json.getLong("remindAt"), json.optBoolean("warning", false)
       )
 
       fun fromIntent(intent: Intent): Reminder? {
@@ -60,14 +63,14 @@ object Reminders {
         val taskId = intent.getStringExtra("taskId") ?: return null
         return Reminder(
           intent.getIntExtra("id", 0), intent.getLongExtra("at", 0), title, taskId,
-          intent.getLongExtra("remindAt", 0)
+          intent.getLongExtra("remindAt", 0), intent.getBooleanExtra("warning", false)
         )
       }
     }
 
     fun putInto(intent: Intent): Intent = intent
       .putExtra("id", id).putExtra("at", at).putExtra("title", title)
-      .putExtra("taskId", taskId).putExtra("remindAt", remindAt)
+      .putExtra("taskId", taskId).putExtra("remindAt", remindAt).putExtra("warning", warning)
   }
 
   @Synchronized
@@ -128,7 +131,7 @@ object Reminders {
       Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
-    val notification = NotificationCompat.Builder(context, CHANNEL)
+    val builder = NotificationCompat.Builder(context, CHANNEL)
       .setSmallIcon(android.R.drawable.ic_popup_reminder)
       .setContentTitle("NothingToDo reminder")
       .setContentText(reminder.title)
@@ -138,9 +141,12 @@ object Reminders {
       .setPriority(NotificationCompat.PRIORITY_HIGH)
       .setContentIntent(open)
       .setAutoCancel(true)
-      .addAction(0, "Complete", button(context, reminder, ACTION_COMPLETE))
-      .addAction(0, "Snooze 10 min", button(context, reminder, ACTION_SNOOZE))
-      .build()
+    if (!reminder.warning) {
+      builder
+        .addAction(0, "Complete", button(context, reminder, ACTION_COMPLETE))
+        .addAction(0, "Snooze 10 min", button(context, reminder, ACTION_SNOOZE))
+    }
+    val notification = builder.build()
     try {
       NotificationManagerCompat.from(context).notify(reminder.id, notification)
     } catch (_: SecurityException) {
@@ -264,6 +270,7 @@ class ScheduledReminder {
   var title: String = ""
   var taskId: String = ""
   var remindAt: Long = 0
+  var warning: Boolean = false
 }
 
 @InvokeArg
@@ -289,7 +296,7 @@ class ReminderPlugin(private val activity: Activity) : Plugin(activity) {
     val args = invoke.parseArgs(ScheduleArgs::class.java)
     Reminders.replace(
       activity.applicationContext,
-      args.reminders.map { Reminders.Reminder(it.id, it.at, it.title, it.taskId, it.remindAt) }
+      args.reminders.map { Reminders.Reminder(it.id, it.at, it.title, it.taskId, it.remindAt, it.warning) }
     )
     invoke.resolve()
   }

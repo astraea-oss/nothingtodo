@@ -192,6 +192,12 @@ async fn sync_now(state: State<'_, AppState>) -> Result<(), String> {
         .map_err(|_| "Sync worker stopped.".to_string())
 }
 
+/// The next occurrences of a task being edited, from the same engine that rolls series forward.
+#[tauri::command]
+fn preview_occurrences(task: Task, count: usize) -> Result<Vec<i64>, String> {
+    task.upcoming(count.min(8))
+}
+
 /// The page became visible: apply notification buttons pressed meanwhile and refresh alarms.
 #[tauri::command]
 fn refresh_reminders(app: AppHandle) {
@@ -266,6 +272,7 @@ pub fn run() {
             sync_now,
             sync_status,
             open_notification_settings,
+            preview_occurrences,
             refresh_reminders,
             backup::export_backup,
             backup::preview_backup,

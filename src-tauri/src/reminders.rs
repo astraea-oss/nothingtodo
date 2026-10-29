@@ -168,6 +168,7 @@ mod android {
                     "title": a.title,
                     "taskId": a.task_id,
                     "remindAt": a.remind_at,
+                    "warning": a.warning,
                 })
             })
             .collect();
@@ -180,14 +181,28 @@ mod android {
 pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
     use tauri_plugin_notification::{NotificationExt, PermissionState};
 
+    // Warnings fire as their time passes while the app runs; ones missed while it was closed are
+    // not sent late, matching the missed-reminder rule.
+    let mut checked = now_ms();
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let now = now_ms();
         if app.notification().permission_state().ok() != Some(PermissionState::Granted) {
+            checked = now;
             continue;
         }
         let state = app.state::<AppState>();
         let mut store = state.store.lock().await;
-        for (id, task, due) in store.due(now_ms()) {
+        for (_, title) in store.warnings_between(checked, now) {
+            let _ = app
+                .notification()
+                .builder()
+                .title(TITLE)
+                .body(&title)
+                .show();
+        }
+        checked = now;
+        for (id, task, due) in store.due(now) {
             let shown = app
                 .notification()
                 .builder()

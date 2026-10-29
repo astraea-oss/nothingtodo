@@ -16,6 +16,11 @@ fn task(i: usize) -> Task {
         remind_at: Some(1_900_000_000_000 + i as i64 * 60_000),
         kind: None,
         date: None,
+        duration_minutes: None,
+        repeat: None,
+        repeat_from: None,
+        time_zone: None,
+        warnings: vec![],
         extra: Default::default(),
     }
 }
