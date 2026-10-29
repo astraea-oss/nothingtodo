@@ -3,10 +3,15 @@ import '@fontsource/doto/900.css';
 import '@fontsource/space-grotesk/400.css';
 import '@fontsource/space-grotesk/600.css';
 import '@fontsource/space-mono/400.css';
+import '@fontsource/space-mono/700.css';
 import './styles.css';
 import { invoke, isTauri } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
+
+// Layout follows direction 02 "Strip" in docs/design/ui-directions.html: a dot date header, a week
+// strip with dot loads, day bands with rows on a dotted gutter rail and a red NOW line, and an
+// input bar at the bottom. Keep additions inside that structure.
 
 interface Task { schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null }
 interface Remote { key: string; value: Task | null; version: number; deleted: boolean }
@@ -20,180 +25,140 @@ interface Snapshot { records: Record<string, TaskRecord>; cursor: number; bindin
 const root = document.querySelector<HTMLDivElement>('#app')!;
 root.innerHTML = `
   <main>
-    <header class="app-header">
-      <div>
-        <h1 id="date-heading" class="dot"></h1>
-        <p id="date-detail" class="label"></p>
-      </div>
-      <button id="sync-badge" class="badge" type="button" aria-label="Sync and backup settings" aria-live="polite"></button>
+    <header class="top">
+      <h1 id="date-heading" class="dot"></h1>
+      <button id="open-settings" class="lbl" type="button" aria-label="Settings"></button>
     </header>
-    <div id="notify-warning" class="warning" role="alert" hidden>
-      <p>Notifications are off, so reminders won’t appear.</p>
-      <button id="enable-notifications" class="primary" type="button">Turn on notifications</button>
+    <div id="strip" class="strip" aria-label="Week"></div>
+    <div id="gutter" class="gt"></div>
+    <div class="fx-wrap">
+      <form id="quick" class="fx">
+        <button id="open-sheet" class="fx-k" type="button" aria-label="More fields">ƒx</button>
+        <input id="quick-input" class="fx-in" autocomplete="off" enterkeyhint="done" aria-label="New task">
+      </form>
+      <div class="fx-hint">
+        <button id="unscheduled" class="lbl" type="button"></button>
+        <span id="hint" class="lbl" role="status" aria-live="polite"></span>
+      </div>
     </div>
-    <p id="status" role="status" aria-live="polite"></p>
-    <nav class="week" aria-label="Week">
-      <button id="week-back" class="icon" type="button" aria-label="Previous week">‹</button>
-      <div id="strip" class="strip"></div>
-      <button id="week-next" class="icon" type="button" aria-label="Next week">›</button>
-    </nav>
-    <div class="list-header">
-      <p id="list-label" class="label"></p>
-      <input id="search" type="search" placeholder="Search" aria-label="Search titles and notes (press /)" autocomplete="off">
-      <select id="filter" aria-label="Show"><option value="active">Upcoming</option><option value="all">All</option><option value="completed">Done</option></select>
-    </div>
-    <div id="tasks"></div>
-    <p id="empty" class="empty" hidden>Nothing here yet.</p>
-    <p id="sync-counts" class="hint"></p>
-    <button id="add" class="add" type="button"><span class="red-dot" aria-hidden="true"></span>Add</button>
     <div id="sheet" class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title" hidden>
-      <form id="task-form">
+      <form id="task-form" class="panel">
         <div class="grip" aria-hidden="true"></div>
         <input id="sheet-title" name="title" class="sheet-title" required maxlength="500" autocomplete="off" placeholder="What needs doing?" aria-label="Title">
         <div class="keys" role="radiogroup" aria-label="Type">
-          <button type="button" class="key" disabled title="Alarms arrive with entry types"><i class="shape alarm"></i>Alarm</button>
-          <button type="button" class="key on" aria-pressed="true"><i class="shape reminder"></i>Reminder</button>
-          <button type="button" class="key" disabled title="Markers arrive with entry types"><i class="shape marker"></i>Marker</button>
+          <button type="button" class="key" disabled title="Alarms arrive with entry types"><i class="node al"></i>Alarm</button>
+          <button type="button" class="key on" aria-pressed="true"><i class="node"></i>Reminder</button>
+          <button type="button" class="key" disabled title="Markers arrive with entry types"><i class="node mk"></i>Marker</button>
         </div>
         <div class="readout">
           <input name="time" type="time" class="dot" aria-label="Time">
-          <span id="readout-day" class="label"></span>
+          <span id="readout-day" class="lbl"></span>
         </div>
         <div id="day-chips" class="chips" role="radiogroup" aria-label="Day"></div>
         <input name="date" type="date" hidden aria-label="Date">
-        <button id="more" type="button" class="link" aria-expanded="false">More ▴</button>
-        <div id="more-fields" hidden>
-          <label>Notes <textarea name="notes" maxlength="8000" rows="3"></textarea></label>
-        </div>
-        <p class="hint">Dates use this device’s timezone. <span id="delivery-hint"></span></p>
-        <div class="actions">
-          <button class="primary" type="submit"><span class="red-dot" aria-hidden="true"></span><span id="sheet-submit">Add</span></button>
-          <button id="cancel-edit" type="button">Cancel</button>
+        <label class="lbl">Notes <textarea name="notes" maxlength="8000" rows="3"></textarea></label>
+        <p id="delivery-hint" class="note"></p>
+        <div class="row-actions">
+          <button class="pill on" type="submit"><span id="sheet-submit">↵ Add</span></button>
+          <button id="cancel-edit" class="pill" type="button">Cancel</button>
         </div>
       </form>
     </div>
     <div id="settings" class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-heading" hidden>
-     <div class="panel">
-      <div class="panel-head"><h2 id="settings-heading" class="label">Settings</h2><button id="close-settings" class="icon" type="button" aria-label="Close">×</button></div>
-      <section>
-      <h3 class="label">Sync</h3>
-      <p class="hint">Sync runs after connecting, after edits, and every 30 seconds while the app is running.</p>
-      <form id="sync-form">
-        <label>API origin <input name="endpoint" type="url" value="https://api.astraeaoss.co.uk" required></label>
-        <label>Account token <input name="token" type="password" autocomplete="off" spellcheck="false" required></label>
-        <label class="check"><input name="remember" type="checkbox" checked> Remember on this device (system keyring)</label>
-        <button class="primary" type="submit">Connect</button>
-      </form>
-      <div id="sync-connected" class="actions" hidden>
-        <button id="sync" type="button">Sync now</button>
-        <button id="disconnect" type="button">Disconnect</button>
+      <div class="panel">
+        <div class="panel-head"><h2 id="settings-heading" class="lbl">Settings</h2><button id="close-settings" class="pill" type="button">Close</button></div>
+        <section>
+          <h3 class="lbl">Sync</h3>
+          <form id="sync-form">
+            <label class="lbl">API origin <input name="endpoint" type="url" value="https://api.astraeaoss.co.uk" required></label>
+            <label class="lbl">Account token <input name="token" type="password" autocomplete="off" spellcheck="false" required></label>
+            <label class="check"><input name="remember" type="checkbox" checked> Remember on this device (system keyring)</label>
+            <button class="pill on" type="submit">Connect</button>
+          </form>
+          <div id="sync-connected" class="row-actions" hidden>
+            <button id="sync" class="pill" type="button">Sync now</button>
+            <button id="disconnect" class="pill" type="button">Disconnect</button>
+          </div>
+          <p id="sync-connection" class="note" role="status" aria-live="polite"></p>
+          <p id="sync-notice" class="note" role="status"></p>
+        </section>
+        <section>
+          <h3 class="lbl">Backup</h3>
+          <p class="note">Backups hold your tasks in plain text, without your sync token. Keep them private.</p>
+          <div class="row-actions">
+            <button id="export-backup" class="pill" type="button">Export</button>
+            <button id="choose-backup" class="pill" type="button">Use a backup file</button>
+            <input id="backup-file" type="file" accept=".json,application/json" hidden>
+          </div>
+          <div id="backup-choice" class="conflict" hidden>
+            <p id="backup-summary" class="note"></p>
+            <div class="row-actions">
+              <button id="backup-copy" class="pill" type="button">Add as copies</button>
+              <button id="backup-restore" class="pill r" type="button">Replace this device’s tasks</button>
+              <button id="backup-cancel" class="pill" type="button">Cancel</button>
+            </div>
+            <p class="note">Copies are safe for another account. Replacing restores this profile; the current data is saved first, and changes made elsewhere since sync back in.</p>
+          </div>
+        </section>
       </div>
-      <p id="sync-connection" role="status" aria-live="polite"></p>
-      <p id="sync-notice" class="notice" role="status"></p>
-      </section>
-      <section>
-      <h3 class="label">Backup</h3>
-      <p class="hint">Backups hold your tasks in plain text, without your sync token. Keep them private.</p>
-      <div class="actions">
-        <button id="export-backup" type="button">Export backup</button>
-        <button id="choose-backup" type="button">Use a backup file…</button>
-        <input id="backup-file" type="file" accept=".json,application/json" hidden>
-      </div>
-      <div id="backup-choice" class="conflict" hidden>
-        <p id="backup-summary"></p>
-        <div class="actions">
-          <button id="backup-copy" type="button">Add these tasks to this device</button>
-          <button id="backup-restore" type="button">Replace this device’s tasks</button>
-          <button id="backup-cancel" type="button">Cancel</button>
-        </div>
-        <p class="hint">Adding creates new copies, safe for another account. Replacing restores this profile as it was; the current data is saved first, and changes made elsewhere since the backup sync back in.</p>
-      </div>
-      </section>
-     </div>
     </div>
   </main>`;
 
 const $ = <T extends Element>(selector: string) => document.querySelector<T>(selector)!;
 const form = $<HTMLFormElement>('#task-form');
 const syncForm = $<HTMLFormElement>('#sync-form');
-const list = $<HTMLDivElement>('#tasks');
-const filter = $<HTMLSelectElement>('#filter');
+const gutter = $<HTMLDivElement>('#gutter');
+const quick = $<HTMLInputElement>('#quick-input');
 const cancelEdit = $<HTMLButtonElement>('#cancel-edit');
+const sheet = $<HTMLDivElement>('#sheet');
+const settings = $<HTMLDivElement>('#settings');
 let data: Snapshot = { records: {}, cursor: 0, binding: null };
 let editing: string | null = null;
 let busy = false;
+let notificationsOff = false;
 let sync: SyncStatus = {
   connected: false, remembered: false, syncing: false, catchingUp: false,
   lastSyncedAt: null, error: null, retryInSeconds: null, notice: null,
 };
 
-function showSyncStatus(state: SyncStatus) {
-  const rerender = sync.connected !== state.connected;
-  sync = state;
-  if (rerender) render();
-  syncForm.hidden = state.connected;
-  $<HTMLElement>('#sync-connected').hidden = !state.connected;
-  const message = !state.connected ? 'Not connected. Tasks are stored on this device only.'
-    : state.catchingUp ? 'Downloading sync history…'
-    : state.syncing ? 'Syncing…'
-    : state.error ? `${state.error} Retrying automatically in ${state.retryInSeconds ?? 300}s.`
-    : state.lastSyncedAt !== null ? `Last synced ${new Date(state.lastSyncedAt).toLocaleTimeString()}.`
-    : 'Connected.';
-  const remembered = state.connected ? (state.remembered ? ' Reconnects automatically after restarting.' : ' Connected for this session only.') : '';
-  $('#sync-connection').textContent = message + remembered;
-  $('#sync-notice').textContent = state.notice ?? '';
-  const badge = $<HTMLElement>('#sync-badge');
-  badge.textContent = !state.connected ? 'Offline' : state.error ? 'Sync error' : state.syncing || state.catchingUp ? 'Syncing' : 'Synced';
-  badge.dataset.state = !state.connected ? 'offline' : state.error ? 'error' : 'ok';
-}
-
-async function wakeSync() {
-  if (sync.connected) await invoke('sync_now');
-}
-
-// Focus can fire many times a minute (with focus-follows-mouse, on every pass of the pointer), so
-// returning to the app syncs at most every 15 seconds. The worker's 30-second poll covers the rest.
-const RETURN_SYNC_COOLDOWN_MS = 15_000;
-let lastReturnSync = 0;
-function syncOnReturn() {
-  const recent = Math.max(lastReturnSync, sync.lastSyncedAt ?? 0);
-  if (sync.syncing || Date.now() - recent < RETURN_SYNC_COOLDOWN_MS) return;
-  lastReturnSync = Date.now();
-  void wakeSync().catch(error => status(String(error)));
-}
-
-function status(message: string) { $('#status').textContent = message; }
-function field(name: string) { return form.elements.namedItem(name) as HTMLInputElement | HTMLTextAreaElement; }
+// ── Small helpers ──
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text = '') {
   const element = document.createElement(tag);
   if (className) element.className = className;
   if (text) element.textContent = text;
   return element;
 }
-function button(label: string, action: () => Promise<void> | void, className?: string) {
-  const element = el('button', className, label);
+function pill(label: string, action: () => Promise<void> | void, className = '') {
+  const element = el('button', `pill ${className}`, label);
   element.type = 'button';
-  element.addEventListener('click', () => { void run(action); });
+  element.addEventListener('click', event => { event.stopPropagation(); void run(action); });
   return element;
 }
+function field(name: string) { return form.elements.namedItem(name) as HTMLInputElement | HTMLTextAreaElement; }
+
+// Messages replace the right-hand hint under the input bar for a few seconds.
+let statusTimer = 0;
+function status(message: string) {
+  const hint = $<HTMLElement>('#hint');
+  hint.textContent = message;
+  hint.classList.add('message');
+  clearTimeout(statusTimer);
+  statusTimer = window.setTimeout(() => { hint.classList.remove('message'); renderHint(); }, 5000);
+}
+
 async function run(action: () => Promise<void> | void) {
   if (busy) return;
   busy = true;
   root.setAttribute('aria-busy', 'true');
-  const controls = [...root.querySelectorAll<HTMLButtonElement | HTMLInputElement>('button, input[type=checkbox]')].map(b => [b, b.disabled] as const);
-  controls.forEach(([b]) => { b.disabled = true; });
   try { await action(); }
   catch (error) { status(String(error)); }
-  finally {
-    busy = false; root.removeAttribute('aria-busy');
-    controls.forEach(([b, disabled]) => { b.disabled = disabled; });
-  }
+  finally { busy = false; root.removeAttribute('aria-busy'); }
 }
 async function refresh() {
   data = await invoke<Snapshot>('snapshot');
   render();
 }
-async function save(id: string, task: Task) {
+async function save(id: string | null, task: Task) {
   await invoke('save_task', { id, task }); await refresh();
 }
 
@@ -204,7 +169,7 @@ function reminderAt(record: TaskRecord) {
   return remindAt !== null && snooze?.of === remindAt && snooze.until > remindAt ? snooze.until : remindAt;
 }
 
-// ── Days. Local midnights, stepped with Date so DST changes do not shift them. ──
+// ── Days: local midnights, stepped with Date so DST changes do not shift them ──
 function startOfDay(time: number) { const d = new Date(time); d.setHours(0, 0, 0, 0); return d.getTime(); }
 function addDays(day: number, count: number) { const d = new Date(day); d.setDate(d.getDate() + count); return d.getTime(); }
 function weekStart(day: number) { const d = new Date(day); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return d.getTime(); }
@@ -213,253 +178,303 @@ function isoWeek(day: number) {
   const first = new Date(d.getFullYear(), 0, 4);
   return 1 + Math.round(((d.getTime() - first.getTime()) / 86_400_000 - 3 + (first.getDay() + 6) % 7) / 7);
 }
-function dayName(day: number) {
-  const today = startOfDay(Date.now());
-  if (day === today) return 'Today';
-  if (day === addDays(today, 1)) return 'Tomorrow';
-  if (day === addDays(today, -1)) return 'Yesterday';
-  return new Date(day).toLocaleDateString([], { weekday: 'short', day: 'numeric', month: 'short' });
-}
-// 24-hour, as in the design: fixed width, so rows line up.
-const clock = (time: number) => new Date(time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
-function until(due: number, now: number) {
-  const minutes = Math.round((due - now) / 60_000);
-  if (minutes < 0) return 'late';
-  if (minutes < 1) return 'now';
-  if (minutes < 60) return `${minutes}m`;
-  if (minutes < 48 * 60) return `${Math.round(minutes / 60)}h`;
-  return `${Math.round(minutes / 1440)}d`;
-}
-function isoDate(day: number) {
-  const d = new Date(day), p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+const two = (n: number) => String(n).padStart(2, '0');
+const weekday = (day: number) => new Date(day).toLocaleDateString([], { weekday: 'short' });
+const shortDay = (day: number) => `${weekday(day)} ${new Date(day).getDate()}`;
+const longDay = (day: number) => `${weekday(day)} ${new Date(day).getDate()} ${new Date(day).toLocaleDateString([], { month: 'short' })}`;
+const clock = (time: number) => { const d = new Date(time); return `${two(d.getHours())}:${two(d.getMinutes())}`; };
+function isoDate(day: number) { const d = new Date(day); return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}`; }
+// Countdown as in the design: 45m, 1h14, 1d19, with a minus sign once past.
+function countdown(due: number, now: number) {
+  const minutes = Math.round((due - now) / 60_000), sign = minutes < 0 ? '−' : '', m = Math.abs(minutes);
+  if (m < 60) return `${sign}${m}m`;
+  if (m < 1440) return `${sign}${Math.floor(m / 60)}h${two(m % 60)}`;
+  return `${sign}${Math.floor(m / 1440)}d${two(Math.floor((m % 1440) / 60))}`;
 }
 
 let selectedDay = startOfDay(Date.now());
 let expanded: string | null = null;
+let showUnscheduled = false;
 type Entry = [string, TaskRecord];
 
-function renderHeader() {
-  const day = new Date(selectedDay);
-  $('#date-heading').textContent = `${day.toLocaleDateString([], { weekday: 'short' })} ${day.getDate()}`;
-  $('#date-detail').textContent = `${day.toLocaleDateString([], { month: 'short', year: 'numeric' })} · wk ${isoWeek(selectedDay)}`;
+// ── Typing in the bar: "Call the bank fri 8am" ──
+const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+const FULL_DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+interface Parsed { title: string; day: number | null; minutes: number | null }
+function parse(text: string): Parsed {
+  let day: number | null = null, minutes: number | null = null;
+  const today = startOfDay(Date.now());
+  const kept: string[] = [];
+  for (const word of text.trim().split(/\s+/).filter(Boolean)) {
+    const w = word.toLowerCase();
+    // A time needs am/pm or a separator, so "2 bins" stays in the title.
+    const time = /^(\d{1,2})(?:[:.](\d{2}))?(am|pm)?$/.exec(w);
+    if (time && (time[2] || time[3]) && minutes === null) {
+      let hour = Number(time[1]);
+      if (time[3] === 'pm' && hour < 12) hour += 12;
+      if (time[3] === 'am' && hour === 12) hour = 0;
+      const minute = Number(time[2] ?? 0);
+      if (hour < 24 && minute < 60) { minutes = hour * 60 + minute; continue; }
+    }
+    if (day === null && (w === 'today' || w === 'tod')) { day = today; continue; }
+    if (day === null && (w === 'tomorrow' || w === 'tmr' || w === 'tom')) { day = addDays(today, 1); continue; }
+    const index = Math.max(DAYS.indexOf(w), FULL_DAYS.indexOf(w));
+    if (day === null && index >= 0) { day = addDays(today, (index - new Date(today).getDay() + 7) % 7); continue; }
+    if (w === 'at' && kept.length) continue;
+    kept.push(word);
+  }
+  return { title: kept.join(' '), day, minutes };
+}
+function quickTarget(parsed: Parsed) {
+  if (parsed.minutes === null) return null;
+  const d = new Date(parsed.day ?? selectedDay);
+  d.setHours(Math.floor(parsed.minutes / 60), parsed.minutes % 60, 0, 0);
+  return d.getTime();
+}
+
+// ── Rendering ──
+function renderHeader(shownDay: number, preview: boolean) {
+  $('#date-heading').textContent = shortDay(shownDay);
+  const label = $<HTMLButtonElement>('#open-settings');
+  label.classList.toggle('red', preview || !!sync.error);
+  label.textContent = preview ? 'preview' : sync.error ? 'sync error ›'
+    : `${new Date(shownDay).toLocaleDateString([], { month: 'short', year: 'numeric' })} · wk ${isoWeek(shownDay)}`;
   const strip = $<HTMLDivElement>('#strip');
   strip.replaceChildren();
-  const today = startOfDay(Date.now());
-  const start = weekStart(selectedDay);
+  const now = Date.now();
+  const start = weekStart(shownDay);
+  const month = new Date(shownDay).getMonth();
   for (let i = 0; i < 7; i++) {
     const day = addDays(start, i), next = addDays(day, 1);
-    const load = Object.values(data.records).filter(r => {
-      const due = reminderAt(r);
-      return r.task && !r.task.completed && due !== null && due >= day && due < next;
-    }).length;
-    const cell = el('button', 'day');
+    const cell = el('button', day === shownDay ? 'on' : '');
     cell.type = 'button';
-    cell.classList.toggle('on', day === selectedDay);
-    cell.classList.toggle('today', day === today);
-    cell.setAttribute('aria-label', `${new Date(day).toDateString()}, ${load} reminder${load === 1 ? '' : 's'}`);
-    cell.setAttribute('aria-pressed', String(day === selectedDay));
-    cell.append(el('span', 'label', new Date(day).toLocaleDateString([], { weekday: 'narrow' })), el('b', 'dot', String(new Date(day).getDate())));
-    const dots = el('span', 'load');
-    for (let n = 0; n < Math.min(load, 4); n++) dots.append(el('i'));
-    cell.append(dots);
-    cell.addEventListener('click', () => { selectedDay = day; render(); });
+    const dues = Object.values(data.records).filter(r => r.task && !r.task.completed && !r.unsupported)
+      .map(reminderAt).filter((d): d is number => d !== null && d >= day && d < next);
+    cell.setAttribute('aria-label', `${new Date(day).toDateString()}, ${dues.length} reminder${dues.length === 1 ? '' : 's'}`);
+    cell.setAttribute('aria-pressed', String(day === shownDay));
+    const load = el('span', 'load');
+    for (const due of dues.slice(0, 4)) load.append(el('i', due <= now ? 'r' : ''));
+    cell.append(el('span', 'lbl', new Date(day).toLocaleDateString([], { weekday: 'narrow' })),
+      el('b', new Date(day).getMonth() !== month ? 'dim' : '', two(new Date(day).getDate())), load);
+    cell.addEventListener('click', () => { selectedDay = day; expanded = null; render(); });
     strip.append(cell);
   }
 }
 
-function row(id: string, record: TaskRecord, now: number) {
+function band(label: string, count: string, className = '', onClick?: () => void) {
+  const b = el(onClick ? 'button' : 'div', `gt-band ${className}`);
+  if (onClick) { (b as HTMLButtonElement).type = 'button'; b.addEventListener('click', onClick); }
+  b.append(el('span', '', label), el('span', '', count));
+  gutter.append(b);
+}
+
+function nowLine(now: number) {
+  const line = el('div', 'gt-now');
+  line.append(el('span', 'tm', clock(now)), el('span', 'nd'), el('hr'));
+  gutter.append(line);
+}
+
+function row(id: string, record: TaskRecord, now: number, showDay = false) {
   const task = record.task;
   const readOnly = record.unsupported !== null;
   const due = reminderAt(record);
-  const wrap = el('div', 'entry');
-  const line = el('div', 'row');
-  line.classList.toggle('done', !!task?.completed);
-  line.classList.toggle('overdue', !!task && !task.completed && due !== null && due <= now);
-  const tick = el('input', 'tick');
-  tick.type = 'checkbox'; tick.checked = !!task?.completed; tick.disabled = readOnly || !task;
-  tick.setAttribute('aria-label', task?.completed ? `Reopen ${task.title}` : `Complete ${task?.title ?? 'task'}`);
-  if (task) tick.addEventListener('change', () => { void run(() => save(id, { ...task, completed: tick.checked })); });
-  const title = el('button', 'title');
-  title.type = 'button';
-  title.setAttribute('aria-expanded', String(expanded === id));
-  title.append(el('span', '', task?.title ?? (readOnly ? 'A task from a newer version' : 'Deleted on this device')));
-  const firstLine = task?.notes.split('\n')[0];
-  if (firstLine && expanded !== id) title.append(el('span', 'sub', firstLine));
-  title.addEventListener('click', () => { expanded = expanded === id ? null : id; render(); });
-  const glyph = el('i', record.conflict ? 'glyph conflict' : record.dirty && sync.connected ? 'glyph pending' : 'glyph');
-  glyph.title = record.conflict ? 'Conflict' : record.dirty && sync.connected ? 'Not yet synced' : '';
-  line.append(tick, el('span', 'time', due !== null ? clock(due) : '—'), el('i', 'shape reminder'), title,
-    el('span', 'until', task?.completed ? 'done' : due !== null ? until(due, now) : ''), glyph);
-  wrap.append(line);
-  if (expanded === id || record.conflict) wrap.append(details(id, record, now));
-  return wrap;
+  const done = !!task?.completed;
+  const late = !done && due !== null && due <= now;
+  const line = el('div', 'gt-row');
+  line.classList.toggle('open', expanded === id);
+  // The node on the rail is the checkbox.
+  const node = el('button', `node${done ? ' x' : ''}${late ? ' r' : ''}`);
+  node.type = 'button';
+  node.disabled = readOnly || !task;
+  node.setAttribute('aria-label', done ? `Reopen ${task?.title}` : `Complete ${task?.title ?? 'task'}`);
+  if (task) node.addEventListener('click', event => { event.stopPropagation(); void run(() => save(id, { ...task, completed: !done })); });
+  const time = due === null ? '—' : showDay ? `${weekday(due)} ${clock(due)}` : clock(due);
+  const title = el('span', `t${done ? ' done' : ''}`, task?.title ?? (readOnly ? 'From a newer app version' : 'Deleted on this device'));
+  // Sync glyphs: synced is silent, pending a ring, conflict a red dot.
+  const sy = el('span', record.conflict ? 'sy c' : record.dirty && sync.connected ? 'sy p' : 'sy');
+  line.append(el('span', `tm${late ? ' red' : done ? ' dim' : ''}`, time), node, title,
+    el('span', `n${late ? ' red' : ''}`, done ? 'done' : due !== null ? countdown(due, now) : ''), sy);
+  line.addEventListener('click', () => { expanded = expanded === id ? null : id; render(); });
+  gutter.append(line);
+  if (expanded === id || record.conflict) gutter.append(details(id, record, now));
 }
 
 function details(id: string, record: TaskRecord, now: number) {
   const task = record.task;
   const readOnly = record.unsupported !== null;
   const due = reminderAt(record);
-  const box = el('div', 'details');
-  const meta = el('p', 'meta');
-  if (task?.remindAt != null) meta.append(el('span', '', `${new Date(task.remindAt).toLocaleDateString([], { dateStyle: 'full' })}, ${clock(task.remindAt)}`));
-  if (task && due !== null && due !== task.remindAt && !task.completed) meta.append(el('span', '', `Snoozed on this device until ${clock(due)}`));
-  if (record.dirty && sync.connected) meta.append(el('span', 'pending', 'Not yet synced'));
-  if (readOnly) meta.append(el('span', 'pending', 'Changed by a newer version of NothingToDo. Update the app to edit it.'));
-  if (meta.childElementCount) box.append(meta);
+  const box = el('div', 'gt-detail');
   if (task?.notes) box.append(el('p', 'notes', task.notes));
+  if (task && due !== null && due !== task.remindAt && !task.completed) box.append(el('p', 'lbl', `Snoozed on this device until ${clock(due)}`));
+  if (record.dirty && sync.connected) box.append(el('p', 'lbl', 'Not yet synced'));
+  if (readOnly) box.append(el('p', 'lbl', 'Changed by a newer app version. Update to edit.'));
   if (task && !readOnly) {
-    const actions = el('div', 'actions');
-    actions.append(button('Edit', () => openSheet(id)));
+    const actions = el('div', 'row-actions');
+    actions.append(pill('Edit', () => openSheet(id)));
     // Only a reminder that has gone off can be snoozed; snoozing earlier would bring it forward.
-    if (!task.completed && due !== null && due <= now) actions.append(button('Snooze 10 min', async () => { await invoke('snooze_task', { id, minutes: 10 }); await refresh(); }));
-    actions.append(button('Delete', async () => { await invoke('delete_task', { id }); expanded = null; await refresh(); }, 'quiet'));
+    if (!task.completed && due !== null && due <= now) actions.append(pill('Snooze 10m', async () => { await invoke('snooze_task', { id, minutes: 10 }); await refresh(); }));
+    actions.append(pill('Delete', async () => { await invoke('delete_task', { id }); expanded = null; await refresh(); }));
     box.append(actions);
   }
   if (record.conflict) {
-    const conflict = el('div', 'conflict');
     const remote = record.conflict.value;
-    conflict.append(el('p', '', `Changed on another device. Server version: ${record.conflict.deleted || !remote ? 'deleted' : `“${remote.title}”${remote.completed ? ' (completed)' : ''}`}. Choose which to keep.`));
-    const actions = el('div', 'actions');
-    actions.append(button('Keep this device’s version', async () => {
-      await invoke('resolve_conflict', { id, keepLocal: true }); await refresh();
-    }, 'primary'), button('Use server version', async () => {
-      await invoke('resolve_conflict', { id, keepLocal: false }); await refresh();
-    }));
+    const conflict = el('div', 'conflict');
+    conflict.append(el('p', 'note', `Changed on another device: ${record.conflict.deleted || !remote ? 'deleted there' : `“${remote.title}”${remote.completed ? ', done' : ''}`}. Keep which?`));
+    const actions = el('div', 'row-actions');
+    actions.append(pill('This device', async () => { await invoke('resolve_conflict', { id, keepLocal: true }); await refresh(); }, 'on'),
+      pill('Other device', async () => { await invoke('resolve_conflict', { id, keepLocal: false }); await refresh(); }));
     conflict.append(actions);
     box.append(conflict);
   }
+  box.addEventListener('click', event => event.stopPropagation());
   return box;
 }
 
-function group(label: string, entries: Entry[], now: number, options: { id?: string; className?: string; empty?: string } = {}) {
-  const section = el('section', `group ${options.className ?? ''}`);
-  if (options.id) section.id = options.id;
-  section.append(el('h2', 'day-heading', label));
-  for (const [id, record] of entries) section.append(row(id, record, now));
-  if (!entries.length && options.empty) section.append(el('p', 'nothing', options.empty));
-  list.append(section);
-}
-
 function render() {
-  renderHeader();
-  list.replaceChildren();
+  const parsed = parse(quick.value);
+  const target = quickTarget(parsed);
+  // Typing a day previews it, as in the design: the strip jumps there and the new row shows red.
+  const previewDay = quick.value.trim() && parsed.day !== null ? parsed.day : null;
+  const shownDay = previewDay ?? selectedDay;
+  renderHeader(shownDay, previewDay !== null);
+
+  gutter.replaceChildren();
   const now = Date.now();
-  const view = filter.value;
-  const byTime = (a: Entry, b: Entry) => (reminderAt(a[1]) ?? Infinity) - (reminderAt(b[1]) ?? Infinity) || (a[1].task?.title ?? '').localeCompare(b[1].task?.title ?? '');
-  const entries = (Object.entries(data.records) as Entry[]).sort(byTime);
-  // Conflicts and records from newer versions always show, whatever the filter.
+  const today = startOfDay(now);
+  const entries = (Object.entries(data.records) as Entry[])
+    .sort((a, b) => (reminderAt(a[1]) ?? Infinity) - (reminderAt(b[1]) ?? Infinity) || (a[1].task?.title ?? '').localeCompare(b[1].task?.title ?? ''));
+  if (notificationsOff) band('Notifications off · turn on ›', '', 'red', () => { void run(enableNotifications); });
+
+  // Records needing a decision always show, whatever the day.
   const attention = entries.filter(([, r]) => r.conflict || (r.unsupported && !r.task));
-  const query = search.value.trim().toLowerCase();
-  const matches = (task: Task) => !query || task.title.toLowerCase().includes(query) || task.notes.toLowerCase().includes(query);
-  const shown = entries.filter(e => !attention.includes(e) && e[1].task && matches(e[1].task) &&
-    (view === 'all' || (view === 'completed') === e[1].task.completed));
-  if (attention.length) group('Needs attention', attention, now, { className: 'attention' });
-  if (view === 'active') {
-    const overdue = shown.filter(e => reminderAt(e[1])! <= now && reminderAt(e[1]) !== null);
-    if (overdue.length) group('Overdue', overdue, now, { className: 'late' });
+  if (attention.length) {
+    band('Needs attention', String(attention.length), 'red');
+    for (const [id, r] of attention) row(id, r, now, true);
   }
-  const timed = shown.filter(e => reminderAt(e[1]) !== null && (view !== 'active' || reminderAt(e[1])! > now));
-  const days = new Map<number, Entry[]>();
-  for (const entry of timed) {
-    const day = startOfDay(reminderAt(entry[1])!);
-    // Searching looks across every day, not just from the selected one.
-    if (view === 'active' && !query && day < selectedDay) continue;
-    days.set(day, [...(days.get(day) ?? []), entry]);
+  const rest = entries.filter(e => !attention.includes(e) && e[1].task);
+  if (shownDay === today) {
+    const overdue = rest.filter(([, r]) => !r.task!.completed && reminderAt(r) !== null && reminderAt(r)! < today);
+    if (overdue.length) {
+      const first = startOfDay(reminderAt(overdue[0][1])!);
+      const same = overdue.every(([, r]) => startOfDay(reminderAt(r)!) === first);
+      band(same ? `Overdue · ${shortDay(first)}` : 'Overdue', String(overdue.length), 'red');
+      for (const [id, r] of overdue) row(id, r, now, !same);
+    }
   }
-  if (view === 'active' && !query && !days.has(selectedDay)) days.set(selectedDay, []);
-  for (const day of [...days.keys()].sort((a, b) => a - b)) {
-    group(dayName(day), days.get(day)!, now, { id: `day-${day}`, className: day === selectedDay ? 'selected' : '', empty: 'Nothing planned.' });
+  const next = addDays(shownDay, 1);
+  const dayEntries = rest.filter(([, r]) => { const d = reminderAt(r); return d !== null && d >= shownDay && d < next; });
+  const adding = target !== null && startOfDay(target) === shownDay;
+  band(shownDay === today ? 'Today' : longDay(shownDay), adding ? `${dayEntries.length} + 1` : String(dayEntries.length));
+  let drewNow = shownDay !== today;
+  let drewNew = !adding;
+  const newRow = () => {
+    const line = el('div', 'gt-row new');
+    line.append(el('span', 'tm red', clock(target!)), el('span', 'node r'), el('span', 't', parsed.title || '…'), el('span', 'n red', 'new'), el('span'));
+    gutter.append(line);
+  };
+  for (const [id, r] of dayEntries) {
+    const due = reminderAt(r)!;
+    if (!drewNew && target! <= due) { newRow(); drewNew = true; }
+    if (!drewNow && now <= due) { nowLine(now); drewNow = true; }
+    row(id, r, now);
   }
-  const untimed = shown.filter(e => reminderAt(e[1]) === null);
-  if (untimed.length) group('No time', untimed, now);
-  $('#list-label').textContent = query ? 'Matches' : view === 'active' ? `From ${dayName(selectedDay).toLowerCase()}` : view === 'all' ? 'Everything' : 'Done';
-  if (query && !shown.length) list.append(el('p', 'nothing', `Nothing matches “${search.value.trim()}”.`));
-  $<HTMLElement>('#empty').hidden = entries.some(e => e[1].task || e[1].conflict || e[1].unsupported);
-  const records = Object.values(data.records);
-  const pending = records.filter(r => r.dirty).length, conflicts = records.filter(r => r.conflict).length;
-  $('#sync-counts').textContent = sync.connected && (pending || conflicts) ? `${pending} not yet synced · ${conflicts} conflicts` : '';
+  if (!drewNew) newRow();
+  if (!drewNow) nowLine(now);
+  if (!dayEntries.length && !adding && shownDay !== today) gutter.append(el('p', 'gt-empty lbl', 'Nothing planned'));
+
+  const unscheduled = rest.filter(([, r]) => reminderAt(r) === null && !r.task!.completed);
+  if (showUnscheduled && unscheduled.length) {
+    band('Unscheduled', String(unscheduled.length));
+    for (const [id, r] of unscheduled) row(id, r, now);
+  }
+  $('#unscheduled').textContent = unscheduled.length ? `${unscheduled.length} unscheduled ${showUnscheduled ? '‹' : '›'}` : '';
+  quick.placeholder = `New task for ${shortDay(selectedDay)}`;
+  renderHint(parsed, target);
 }
 
-// ── The add sheet ──
-const sheet = $<HTMLDivElement>('#sheet');
+function renderHint(parsed = parse(quick.value), target = quickTarget(parsed)) {
+  const hint = $<HTMLElement>('#hint');
+  if (hint.classList.contains('message')) return;
+  hint.classList.toggle('red', target !== null);
+  hint.textContent = !quick.value.trim() ? '↵ add · e.g. fri 8am'
+    : target !== null ? `→ ${longDay(startOfDay(target))} · ${clock(target)}`
+    : '↵ adds unscheduled';
+}
+
+// ── Input bar ──
+quick.addEventListener('input', () => render());
+$<HTMLFormElement>('#quick').addEventListener('submit', event => {
+  event.preventDefault();
+  void run(async () => {
+    const parsed = parse(quick.value);
+    if (!parsed.title) { quick.focus(); return; }
+    const remindAt = quickTarget(parsed);
+    quick.value = '';
+    await save(null, { schemaVersion: 1, title: parsed.title, notes: '', completed: false, remindAt });
+    if (remindAt !== null) selectedDay = startOfDay(remindAt);
+    else showUnscheduled = true;
+    render();
+    await askForNotifications(remindAt);
+  });
+});
+$('#unscheduled').addEventListener('click', () => { showUnscheduled = !showUnscheduled; render(); });
+
+// ── Strip navigation: swipe on touch, arrow keys on desktop ──
+let swipeX: number | null = null;
+$<HTMLDivElement>('#strip').addEventListener('touchstart', event => { swipeX = event.touches[0].clientX; }, { passive: true });
+$<HTMLDivElement>('#strip').addEventListener('touchend', event => {
+  if (swipeX === null) return;
+  const dx = event.changedTouches[0].clientX - swipeX;
+  swipeX = null;
+  if (Math.abs(dx) > 50) { selectedDay = addDays(selectedDay, dx < 0 ? 7 : -7); expanded = null; render(); }
+});
+
+// ── The sheet: every field, for adding with notes and for editing ──
 function chooseDay(day: number) {
   field('date').value = isoDate(day);
-  $('#readout-day').textContent = dayName(day);
-  const pick = field('date') as HTMLInputElement;
-  for (const chip of $<HTMLDivElement>('#day-chips').children) {
-    chip.setAttribute('aria-pressed', String((chip as HTMLElement).dataset.day === String(day)));
-  }
-  pick.hidden = [...$<HTMLDivElement>('#day-chips').children].some(c => (c as HTMLElement).dataset.day === String(day));
+  $('#readout-day').textContent = longDay(day);
+  const chips = [...$<HTMLDivElement>('#day-chips').children] as HTMLElement[];
+  for (const chip of chips) chip.classList.toggle('on', chip.dataset.day === String(day));
+  (field('date') as HTMLInputElement).hidden = chips.some(c => c.dataset.day === String(day));
 }
 function renderChips() {
   const chips = $<HTMLDivElement>('#day-chips');
   chips.replaceChildren();
   const today = startOfDay(Date.now());
-  for (const day of [today, addDays(today, 1), addDays(today, 2)]) {
-    const chip = el('button', 'chip', day === addDays(today, 2) ? new Date(day).toLocaleDateString([], { weekday: 'short' }) : dayName(day));
+  for (const [day, label] of [[today, 'Today'], [addDays(today, 1), 'Tomorrow'], [addDays(today, 2), weekday(addDays(today, 2))]] as const) {
+    const chip = el('button', 'pill', label);
     chip.type = 'button'; chip.dataset.day = String(day);
     chip.addEventListener('click', () => chooseDay(day));
     chips.append(chip);
   }
-  const pick = el('button', 'chip', 'Pick…');
+  const pick = el('button', 'pill', 'Pick');
   pick.type = 'button';
   pick.addEventListener('click', () => { const input = field('date') as HTMLInputElement; input.hidden = false; input.showPicker?.(); input.focus(); });
   chips.append(pick);
 }
 function openSheet(id: string | null) {
+  const fromBar = id ? null : parse(quick.value);
   editing = id;
   form.reset();
   renderChips();
   const task = id ? data.records[id]?.task : null;
-  const at = task?.remindAt ?? null;
-  field('title').value = task?.title ?? '';
+  const at = task?.remindAt ?? (fromBar ? quickTarget(fromBar) : null);
+  field('title').value = task?.title ?? fromBar?.title ?? '';
   field('notes').value = task?.notes ?? '';
-  field('time').value = at !== null ? new Date(at).toTimeString().slice(0, 5) : '';
+  field('time').value = at !== null ? clock(at) : '';
   chooseDay(at !== null ? startOfDay(at) : Math.max(selectedDay, startOfDay(Date.now())));
-  const more = !!task?.notes;
-  $<HTMLElement>('#more-fields').hidden = !more;
-  $('#more').setAttribute('aria-expanded', String(more));
-  $('#sheet-submit').textContent = id ? 'Save' : 'Add';
+  $('#sheet-submit').textContent = id ? '↵ Save' : '↵ Add';
   sheet.hidden = false;
   field('title').focus();
 }
 function resetEditor() { editing = null; form.reset(); sheet.hidden = true; }
-$('#add').addEventListener('click', () => openSheet(null));
-$('#more').addEventListener('click', () => {
-  const fields = $<HTMLElement>('#more-fields');
-  fields.hidden = !fields.hidden;
-  $('#more').setAttribute('aria-expanded', String(!fields.hidden));
-});
+$('#open-sheet').addEventListener('click', () => openSheet(null));
 field('date').addEventListener('change', () => {
   const value = field('date').value;
   if (value) chooseDay(startOfDay(new Date(`${value}T00:00`).getTime()));
 });
 sheet.addEventListener('click', event => { if (event.target === sheet) resetEditor(); });
-// Sync and backup live in a sheet opened from the sync label, out of the main view.
-const settings = $<HTMLDivElement>('#settings');
-const closeSettings = () => { settings.hidden = true; };
-$('#sync-badge').addEventListener('click', () => { settings.hidden = false; });
-$('#close-settings').addEventListener('click', closeSettings);
-settings.addEventListener('click', event => { if (event.target === settings) closeSettings(); });
-const search = $<HTMLInputElement>('#search');
-search.addEventListener('input', render);
-// Keyboard: n adds, / searches, Escape closes the sheet or clears the search.
-document.addEventListener('keydown', event => {
-  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement;
-  if (event.key === 'Escape') {
-    if (!settings.hidden) closeSettings();
-    else if (!sheet.hidden) resetEditor();
-    else if (search.value) { search.value = ''; render(); search.blur(); }
-    return;
-  }
-  if (typing || event.ctrlKey || event.metaKey || event.altKey || !sheet.hidden || !settings.hidden) return;
-  if (event.key === 'n') { event.preventDefault(); openSheet(null); }
-  if (event.key === '/') { event.preventDefault(); search.focus(); }
-});
-$('#week-back').addEventListener('click', () => { selectedDay = addDays(selectedDay, -7); render(); });
-$('#week-next').addEventListener('click', () => { selectedDay = addDays(selectedDay, 7); render(); });
-
+cancelEdit.addEventListener('click', resetEditor);
 form.addEventListener('submit', event => {
   event.preventDefault();
   void run(async () => {
@@ -467,38 +482,94 @@ form.addEventListener('submit', event => {
     const remindAt = time ? new Date(`${date}T${time}`).getTime() : null;
     if (remindAt !== null && !Number.isFinite(remindAt)) throw new Error('Enter a valid date and time.');
     const existing = editing ? data.records[editing]?.task : null;
-    await invoke('save_task', { id: editing, task: {
+    const wasNew = !editing;
+    await save(editing, {
       ...existing, schemaVersion: 1, title: field('title').value, notes: field('notes').value,
       completed: existing?.completed ?? false, remindAt,
-    } satisfies Task });
-    if (remindAt !== null) selectedDay = Math.max(startOfDay(Date.now()), startOfDay(remindAt));
-    resetEditor(); await refresh(); status('Saved on this device.');
-    // Ask when it first matters; without permission Android drops the reminder silently.
-    if (remindAt !== null && !(await isPermissionGranted())) {
-      notifyWarning.hidden = await requestPermission() === 'granted';
-    }
+    } satisfies Task);
+    if (remindAt !== null) selectedDay = startOfDay(remindAt);
+    if (wasNew) quick.value = '';
+    resetEditor(); render();
+    await askForNotifications(remindAt);
   });
 });
-cancelEdit.addEventListener('click', resetEditor);
-filter.addEventListener('change', render);
 // Android schedules reminders with the OS; desktop shows them from the running app.
 $('#delivery-hint').textContent = /Android/i.test(navigator.userAgent)
-  ? 'Reminders fire even when the app is closed.'
-  : 'Reminders need the app running; closing the window keeps it in the tray.';
-const notifyWarning = $<HTMLDivElement>('#notify-warning');
-async function checkNotifications() { notifyWarning.hidden = await isPermissionGranted(); }
-$('#enable-notifications').addEventListener('click', () => { void run(async () => {
-  if (await isPermissionGranted() || await requestPermission() === 'granted') {
-    notifyWarning.hidden = true; status('Notifications are on.'); return;
-  }
+  ? 'Times use this device’s timezone. Reminders fire even when the app is closed.'
+  : 'Times use this device’s timezone. Reminders need the app running; closing the window keeps it in the tray.';
+
+// ── Notifications ──
+async function checkNotifications() {
+  const off = !(await isPermissionGranted());
+  if (off !== notificationsOff) { notificationsOff = off; render(); }
+}
+async function enableNotifications() {
+  if (await isPermissionGranted() || await requestPermission() === 'granted') { notificationsOff = false; render(); return; }
   // After a refusal Android stops showing its prompt; only the app's settings page can help.
   try { await invoke('open_notification_settings'); }
-  catch { status('Notifications are blocked. Turn them on for NothingToDo in system settings.'); }
+  catch { status('Notifications are blocked. Turn them on in system settings.'); }
+}
+// Ask when it first matters; without permission Android drops the reminder silently.
+async function askForNotifications(remindAt: number | null) {
+  if (remindAt !== null && !(await isPermissionGranted())) {
+    notificationsOff = await requestPermission() !== 'granted';
+    render();
+  }
+}
+
+// ── Settings: sync and backup ──
+function showSyncStatus(state: SyncStatus) {
+  const changed = sync.connected !== state.connected || !!sync.error !== !!state.error;
+  sync = state;
+  if (changed) render();
+  syncForm.hidden = state.connected;
+  $<HTMLElement>('#sync-connected').hidden = !state.connected;
+  const message = !state.connected ? 'Not connected. Tasks are stored on this device only.'
+    : state.catchingUp ? 'Downloading sync history…'
+    : state.syncing ? 'Syncing…'
+    : state.error ? `${state.error} Retrying in ${state.retryInSeconds ?? 300}s.`
+    : state.lastSyncedAt !== null ? `Last synced ${new Date(state.lastSyncedAt).toLocaleTimeString()}.`
+    : 'Connected.';
+  const remembered = state.connected ? (state.remembered ? ' Reconnects automatically after restarting.' : ' Connected for this session only.') : '';
+  $('#sync-connection').textContent = message + remembered;
+  $('#sync-notice').textContent = state.notice ?? '';
+}
+async function wakeSync() {
+  if (sync.connected) await invoke('sync_now');
+}
+// Focus can fire many times a minute (with focus-follows-mouse, on every pass of the pointer), so
+// returning to the app syncs at most every 15 seconds. The worker's 30-second poll covers the rest.
+let lastReturnSync = 0;
+function syncOnReturn() {
+  const recent = Math.max(lastReturnSync, sync.lastSyncedAt ?? 0);
+  if (sync.syncing || Date.now() - recent < 15_000) return;
+  lastReturnSync = Date.now();
+  void wakeSync().catch(error => status(String(error)));
+}
+const closeSettings = () => { settings.hidden = true; };
+$('#open-settings').addEventListener('click', () => { settings.hidden = false; });
+$('#close-settings').addEventListener('click', closeSettings);
+settings.addEventListener('click', event => { if (event.target === settings) closeSettings(); });
+syncForm.addEventListener('submit', event => {
+  event.preventDefault();
+  void run(async () => {
+    const value = (name: string) => syncForm.elements.namedItem(name) as HTMLInputElement;
+    try {
+      await invoke('connect_sync', { endpoint: value('endpoint').value, token: value('token').value, remember: value('remember').checked });
+      status('Sync connected.');
+    } finally { value('token').value = ''; }
+  });
+});
+$('#sync').addEventListener('click', () => { void run(async () => { await invoke('sync_now'); status('Sync requested.'); }); });
+$('#disconnect').addEventListener('click', () => { void run(async () => {
+  await invoke('disconnect_sync');
+  status('Sync disconnected. Tasks stay on this device.');
 }); });
+
 // Local time for backup file names, e.g. 2026-10-29-0915.
 function stamp() {
-  const d = new Date(), p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  const d = new Date();
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}`;
 }
 interface BackupSummary { tasks: number; skipped: number; exportedAt: number }
 const backupFile = $<HTMLInputElement>('#backup-file');
@@ -506,7 +577,7 @@ const backupChoice = $<HTMLDivElement>('#backup-choice');
 let chosenBackup: string | null = null;
 function closeBackupChoice() { chosenBackup = null; backupFile.value = ''; backupChoice.hidden = true; }
 $('#export-backup').addEventListener('click', () => { void run(async () => {
-  status(`Backup saved to ${await invoke<string>('export_backup', { stamp: stamp() })}.`);
+  status(`Backup saved to ${await invoke<string>('export_backup', { stamp: stamp() })}`);
 }); });
 $('#choose-backup').addEventListener('click', () => backupFile.click());
 backupFile.addEventListener('change', () => { void run(async () => {
@@ -525,37 +596,37 @@ $('#backup-copy').addEventListener('click', () => { void run(async () => {
   if (!chosenBackup) return;
   const done = await invoke<BackupSummary>('copy_backup', { json: chosenBackup });
   closeBackupChoice(); await refresh();
-  status(`Added ${done.tasks} task(s) from the backup${done.skipped ? `; left out ${done.skipped} from a newer app version` : ''}.`);
+  status(`Added ${done.tasks} task(s)${done.skipped ? `; left out ${done.skipped}` : ''}`);
 }); });
 $('#backup-restore').addEventListener('click', () => { void run(async () => {
   if (!chosenBackup) return;
   const done = await invoke<BackupSummary & { previous: string }>('restore_backup', { json: chosenBackup, stamp: stamp() });
   closeBackupChoice(); await refresh();
-  status(`Restored ${done.tasks} task(s). The data it replaced was saved to ${done.previous}.`);
+  status(`Restored ${done.tasks} task(s); the replaced data is in ${done.previous}`);
 }); });
 
-syncForm.addEventListener('submit', event => {
-  event.preventDefault();
-  void run(async () => {
-    const value = (name: string) => syncForm.elements.namedItem(name) as HTMLInputElement;
-    try {
-      await invoke('connect_sync', { endpoint: value('endpoint').value, token: value('token').value, remember: value('remember').checked });
-      status('Sync connected.');
-    } finally { value('token').value = ''; }
-  });
+// ── Keyboard: n types a new task, arrows change day, Escape closes ──
+document.addEventListener('keydown', event => {
+  const typing = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement;
+  if (event.key === 'Escape') {
+    if (!settings.hidden) closeSettings();
+    else if (!sheet.hidden) resetEditor();
+    else if (document.activeElement === quick) { quick.value = ''; quick.blur(); render(); }
+    return;
+  }
+  if (typing || event.ctrlKey || event.metaKey || event.altKey || !sheet.hidden || !settings.hidden) return;
+  if (event.key === 'n') { event.preventDefault(); quick.focus(); }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    selectedDay = addDays(selectedDay, event.key === 'ArrowLeft' ? -1 : 1); expanded = null; render();
+  }
 });
-$('#sync').addEventListener('click', () => { void run(async () => {
-  await invoke('sync_now'); status('Sync requested.');
-}); });
-$('#disconnect').addEventListener('click', () => { void run(async () => {
-  await invoke('disconnect_sync');
-  status('Sync disconnected. Tasks stay on this device; reconnect with the same account to continue syncing.');
-}); });
+// Keep the NOW line and countdowns current.
+setInterval(() => { if (!busy && sheet.hidden && !quick.value) render(); }, 30_000);
 
 async function start() {
   if (!isTauri()) {
-    status('Open the native app with npm run tauri dev. The browser preview does not store tasks or connect to sync.');
-    root.querySelectorAll('input, textarea, button, select').forEach(el => { (el as HTMLInputElement).disabled = true; });
+    status('Open the native app with npm run tauri dev; the browser preview stores nothing.');
+    render();
     return;
   }
   await listen('tasks-changed', () => { void refresh().catch(error => status(String(error))); });
@@ -573,8 +644,11 @@ async function start() {
     // buttons while the app was in the background.
     void checkNotifications();
     void invoke('refresh_reminders');
+    render();
   });
   await refresh();
+  // First run with nothing here yet: show where sync is set up.
+  if (!sync.connected && !sync.remembered && Object.keys(data.records).length === 0) settings.hidden = false;
   await wakeSync();
 }
 void start().catch(error => status(String(error)));

@@ -1,8 +1,8 @@
 # NothingToDo
 
-A local-first todo and reminder app for **Linux and Android**, built with Tauri 2 and Rust. The TypeScript UI follows the agreed design in [docs/design/ui-directions.html](docs/design/ui-directions.html): a week strip, day-grouped rows and a short add sheet, with styling in `src/styles.css` and bundled OFL fonts (licences in `public/licenses`).
+A local-first todo and reminder app for **Linux and Android**, built with Tauri 2 and Rust. The TypeScript UI follows direction 02 “Strip” in [docs/design/ui-directions.html](docs/design/ui-directions.html): a week strip, day bands on a gutter rail with a NOW line, and an input bar, with styling in `src/styles.css` and bundled OFL fonts (licences in `public/licenses`).
 
-Implemented: create/edit/complete/delete tasks with optional reminder times, search (`/`) and a quick add shortcut (`n`), a ten-minute snooze that stays on the device, SQLite persistence with numbered migrations, versioned backups (export, restore, or copy into another profile), automatic Astraea Sync that never blocks editing, an account identity check so a token for the wrong account can never upload, credentials remembered in the Linux system keyring or Android Keystore, pending offline changes, explicit local/server conflict choices, and read-only handling of records written by newer versions.
+Implemented: create/edit/complete/delete tasks with optional reminder times, typed quick add (“Call the bank fri 8am”), a ten-minute snooze that stays on the device, SQLite persistence with numbered migrations, versioned backups (export, restore, or copy into another profile), automatic Astraea Sync that never blocks editing, an account identity check so a token for the wrong account can never upload, credentials remembered in the Linux system keyring or Android Keystore, pending offline changes, explicit local/server conflict choices, and read-only handling of records written by newer versions.
 
 **Tasks and backups are stored unencrypted**, protected by your operating-system account (and on Android, app sandboxing and device encryption). Sync tokens are never in the database or backups.
 
