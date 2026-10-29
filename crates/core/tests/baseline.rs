@@ -12,7 +12,7 @@ fn task(i: usize) -> Task {
         schema_version: 1,
         title: format!("Baseline task {i} with a realistic length of title"),
         notes: "A line or two of notes, as most tasks have.".into(),
-        completed: i % 3 == 0,
+        completed: i.is_multiple_of(3),
         remind_at: Some(1_900_000_000_000 + i as i64 * 60_000),
         extra: Default::default(),
     }
