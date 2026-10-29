@@ -43,9 +43,9 @@ fun clock(at: Long): String = SimpleDateFormat("HH:mm", Locale.getDefault()).for
  * An alarm rings until it is stopped (roadmap 5a). The alarm-clock alarm armed in Reminders.kt
  * starts this foreground service, which loops the default alarm sound on the alarm stream,
  * vibrates and shows [AlarmActivity] full screen. Stop records a Complete (a one-off alarm is
- * done, a repeating one moves on) and Snooze re-arms it 10 minutes later, both through the same
+ * done, a repeating one moves on) and Snooze re-arms it after the entry's snooze length, through the same
  * action log as notification buttons. Unanswered, it stops after 10 minutes and leaves a
- * notification behind.
+ * notification behind. A quiet alarm vibrates without sound.
  */
 class AlarmService : Service() {
   companion object {
@@ -95,7 +95,7 @@ class AlarmService : Service() {
       ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
     } else 0
     ServiceCompat.startForeground(this, reminder.id, notification(reminder), type)
-    startSound()
+    if (!reminder.quiet) startSound()
     startVibration()
     handler.removeCallbacks(timeout)
     handler.postDelayed(timeout, LIMIT_MILLIS)
@@ -130,7 +130,7 @@ class AlarmService : Service() {
       .setFullScreenIntent(screen, true)
       .setContentIntent(screen)
       .addAction(0, "Stop", action(STOP))
-      .addAction(0, "Snooze 10 min", action(SNOOZE))
+      .addAction(0, "Snooze ${reminder.snooze} min", action(SNOOZE))
       .build()
   }
 
@@ -280,7 +280,7 @@ class AlarmActivity : ComponentActivity() {
       }
       true
     }
-    val snooze = pill("SNOOZE 10 MIN", false)
+    val snooze = pill("SNOOZE ${reminder.snooze} MIN", false)
     snooze.setOnClickListener { AlarmService.send(this, AlarmService.SNOOZE) }
     val full = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
     root.addView(stop, full)

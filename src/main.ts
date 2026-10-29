@@ -18,7 +18,7 @@ type Repeat = { type: 'fixed'; minutes: number } | { type: 'calendar'; unit: 'da
 interface Task {
   schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null;
   kind?: 'reminder' | 'marker' | 'alarm'; date?: string; durationMinutes?: number; repeat?: Repeat;
-  repeatFrom?: number; timeZone?: string; warnings?: number[];
+  repeatFrom?: number; timeZone?: string; warnings?: number[]; quiet?: boolean; snoozeMinutes?: number;
 }
 interface Remote { key: string; value: Task | null; version: number; deleted: boolean }
 interface TaskRecord { task: Task | null; version: number; dirty: boolean; conflict: Remote | null; notifiedAt: number | null; localRevision: number; snooze: { of: number; until: number } | null; unsupported: { value: unknown; version: number } | null }
@@ -419,11 +419,11 @@ monthSheet.addEventListener('touchend', event => {
 $('#period').addEventListener('click', () => { if (sync.error) openSettings(); else openMonth(selectedDay); });
 
 // ── A desktop alarm ringing now (Android shows its own full-screen alarm) ──
-interface Ringing { taskId: string; title: string; at: number }
+interface Ringing { taskId: string; title: string; at: number; quiet: boolean; snoozeMinutes: number }
 let ringing: Ringing | null = null;
 function ringingBlock(r: Ringing) {
   const box = el('div', 'ringing');
-  box.append(el('span', 'lbl', `Alarm · ${clock(r.at)}`), el('p', 'ring-title', r.title));
+  box.append(el('span', 'lbl', `Alarm · ${clock(r.at)}${r.quiet ? ' · quiet' : ''}`), el('p', 'ring-title', r.title));
   const actions = el('div', 'row-actions');
   // Stopping takes a press-and-hold, as in the design, so a stray tap cannot silence it.
   const stop = el('button', 'pill on', 'Hold to stop');
@@ -434,7 +434,7 @@ function ringingBlock(r: Ringing) {
     hold = window.setTimeout(() => { void run(() => invoke('answer_alarm', { snooze: false })); }, 900);
   });
   for (const end of ['pointerup', 'pointerleave', 'pointercancel']) stop.addEventListener(end, () => { clearTimeout(hold); stop.textContent = 'Hold to stop'; });
-  actions.append(stop, pill('Snooze 10m', () => invoke('answer_alarm', { snooze: true })));
+  actions.append(stop, pill(`Snooze ${r.snoozeMinutes}m`, () => invoke('answer_alarm', { snooze: true })));
   box.append(actions);
   return box;
 }
@@ -509,6 +509,8 @@ function details(id: string, record: TaskRecord, now: number) {
     task?.durationMinutes ? durationText(task.durationMinutes).join(' ').trim() : '',
     task?.repeat ? `repeats ${repeatText(task.repeat).join(' ').trim().toLowerCase()}` : '',
     task?.warnings?.length ? `warns ${[...task.warnings].sort((a, b) => b - a).map(w => spanText(w).toLowerCase()).join(', ')}` : '',
+    task?.quiet ? (task.kind === 'alarm' ? 'vibrate only' : 'silent') : '',
+    task?.snoozeMinutes && task.kind !== 'marker' ? `snooze ${task.snoozeMinutes} min` : '',
   ].filter(Boolean);
   if (facts.length) box.append(el('p', 'lbl', facts.join(' · ')));
   if (task && due !== null && due !== task.remindAt && !task.completed) box.append(el('p', 'lbl', `Snoozed on this device until ${clock(due)}`));
@@ -518,7 +520,7 @@ function details(id: string, record: TaskRecord, now: number) {
     const actions = el('div', 'row-actions');
     actions.append(pill('Edit', () => openSheet(id)));
     // Only a reminder that has gone off can be snoozed; snoozing earlier would bring it forward.
-    if (!task.completed && due !== null && due <= now) actions.append(pill('Snooze 10m', async () => { await invoke('snooze_task', { id, minutes: 10 }); await refresh(); }));
+    if (!task.completed && due !== null && due <= now) actions.append(pill(`Snooze ${task.snoozeMinutes ?? 10}m`, async () => { await invoke('snooze_task', { id, minutes: task.snoozeMinutes ?? 10 }); await refresh(); }));
     if (task.repeat) {
       // Skipping moves the series on without marking anything done.
       actions.append(pill('Skip this one', async () => {
@@ -802,8 +804,8 @@ $<HTMLDivElement>('#strip').addEventListener('touchend', event => {
 // ── The add sheet: one view (revised from the deck's B, 2026-10-29): the short sheet's top half, then
 // compact tiles that open in place (B1) with the B2 instruments inside. ──
 type Kind = 'reminder' | 'marker' | 'alarm';
-interface Draft { kind: Kind; day: number; minutes: number | null; duration: number | null; repeat: Repeat | null; warnings: number[]; notes: string }
-let draft: Draft = { kind: 'reminder', day: startOfDay(Date.now()), minutes: null, duration: null, repeat: null, warnings: [], notes: '' };
+interface Draft { kind: Kind; day: number; minutes: number | null; duration: number | null; repeat: Repeat | null; warnings: number[]; notes: string; quiet: boolean; snooze: number | null }
+let draft: Draft = { kind: 'reminder', day: startOfDay(Date.now()), minutes: null, duration: null, repeat: null, warnings: [], notes: '', quiet: false, snooze: null };
 let openTile: string | null = null;
 let preview: number[] = [];
 // The Repeat tile's custom rule editor stays open once chosen.
@@ -836,7 +838,7 @@ const sameRepeat = (a: Repeat | null, b: Repeat | null) => JSON.stringify(a) ===
 // The task this draft would save, merged over the stored one so unknown fields survive.
 function draftTask(): Task {
   const existing = editing ? data.records[editing]?.task : null;
-  const { kind: _k, date: _d, durationMinutes: _m, repeat: _r, timeZone: _z, warnings: _w, ...rest } = existing ?? {} as Partial<Task>;
+  const { kind: _k, date: _d, durationMinutes: _m, repeat: _r, timeZone: _z, warnings: _w, quiet: _q, snoozeMinutes: _s, ...rest } = existing ?? {} as Partial<Task>;
   const marker = draft.kind === 'marker';
   const timed = draftTime();
   return {
@@ -848,6 +850,9 @@ function draftTask(): Task {
     ...(draft.repeat ? { repeat: draft.repeat } : {}),
     ...(draft.warnings.length ? { warnings: [...draft.warnings].sort((a, b) => b - a) } : {}),
     ...(draft.repeat || draft.warnings.length ? { timeZone: existing?.timeZone ?? zone } : {}),
+    // Markers have no notification to quieten or snooze.
+    ...(!marker && draft.quiet ? { quiet: true } : {}),
+    ...(!marker && draft.snooze && draft.snooze !== 10 ? { snoozeMinutes: draft.snooze } : {}),
   };
 }
 
@@ -994,7 +999,19 @@ function repeatRing(r: Repeat | null) {
   return s;
 }
 
-const TILES = ['duration', 'repeat', 'warn', 'notes'] as const;
+// A row of dots as a waveform: tall in the middle when it sounds, flat when quiet.
+function soundWave(on: boolean) {
+  const s = svg('svg', { viewBox: '0 0 60 24', width: 60, height: 24, 'aria-hidden': 'true' });
+  const heights = [1, 2, 3, 4, 3, 4, 3, 2, 1];
+  heights.forEach((h, i) => {
+    for (let j = 0; j < (on ? h : 1); j++) {
+      s.append(svg('circle', { cx: 6 + i * 6, cy: 12 + (j % 2 ? 1 : -1) * Math.ceil(j / 2) * 4, r: 1.8, fill: on ? 'var(--fg)' : 'var(--faint)' }));
+    }
+  });
+  return s;
+}
+
+const TILES = ['duration', 'repeat', 'warn', 'sound', 'snooze', 'notes'] as const;
 type TileName = typeof TILES[number];
 function tile(name: TileName) {
   const open = openTile === name;
@@ -1095,6 +1112,21 @@ function tile(name: TileName) {
       }])));
       if (marker) t.append(el('p', 'unit', 'Counted back from 09:00 on the day'));
     }
+  } else if (name === 'sound') {
+    const alarm = draft.kind === 'alarm';
+    const [loud, soft] = alarm ? ['Rings', 'Vibrate'] : ['Chime', 'Silent'];
+    t.append(el('span', 'lbl', 'Sound'), row2(big(draft.quiet ? soft : loud, ' small'), soundWave(!draft.quiet)));
+    if (open) {
+      t.append(presets([[loud, !draft.quiet, () => { draft.quiet = false; }], [soft, draft.quiet, () => { draft.quiet = true; }]]));
+      t.append(el('p', 'unit', alarm ? (draft.quiet ? 'Vibrates without sound until stopped' : 'Plays the alarm sound until stopped') : (draft.quiet ? 'Shows the notification without sound' : 'Notification sound as normal')));
+    }
+  } else if (name === 'snooze') {
+    const minutes = draft.snooze ?? 10;
+    t.append(el('span', 'lbl', 'Snooze'), row2(big(String(minutes)), el('span', 'unit', 'min')));
+    if (open) {
+      t.append(presets([5, 10, 15, 30, 60].map(m => [`${m} min`, minutes === m, () => { draft.snooze = m; }] as [string, boolean, () => void])));
+      t.append(el('p', 'unit', 'How long Snooze waits, on the notification and alarm screen'));
+    }
   } else {
     t.append(el('span', 'lbl', 'Notes'));
     if (open) {
@@ -1185,7 +1217,7 @@ function renderSheet() {
     el('span', 'lbl right', `${longDay(draft.day)}${time !== null ? `\nin ${countdown(time, Date.now())}` : marker ? '' : '\ntap to set a time'}`));
   $('#when-edit').replaceChildren(...(openTile === 'when' && !marker ? [whenEditor()] : []));
   $('#day-chips').replaceWith(Object.assign(dayChips(), { id: 'day-chips' }));
-  $<HTMLDivElement>('#tiles').replaceChildren(...TILES.map(tile));
+  $<HTMLDivElement>('#tiles').replaceChildren(...TILES.filter(n => !marker || (n !== 'sound' && n !== 'snooze')).map(tile));
   // Editing a repeating task can change just this occurrence or the whole series.
   const series = !!(editing && data.records[editing]?.task?.repeat);
   $<HTMLButtonElement>('#save-one').hidden = !series;
@@ -1210,6 +1242,8 @@ function openSheet(id: string | null) {
     repeat: task?.repeat ?? fromBar?.repeat ?? null,
     warnings: task?.warnings ?? fromBar?.warnings ?? [],
     notes: task?.notes ?? '',
+    quiet: task?.quiet ?? false,
+    snooze: task?.snoozeMinutes ?? null,
   };
   titleInput.value = task?.title ?? fromBar?.title ?? '';
   openTile = null;

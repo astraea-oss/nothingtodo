@@ -52,6 +52,13 @@ pub struct Task {
     /// so 0 is a "Day of" warning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<u32>,
+    /// Schema 2: `quiet` makes a reminder's notification silent and an alarm vibrate only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quiet: bool,
+    /// Schema 2: how long Snooze delays this entry; 10 minutes when unset. The snooze itself stays
+    /// on the device that pressed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snooze_minutes: Option<u32>,
     /// Fields added by newer app versions within the same schema. They are additive by
     /// definition (a behavioural change needs a new schema version), so they are kept and sent
     /// back unchanged.
@@ -74,6 +81,8 @@ impl Task {
             || self.repeat_from.is_some()
             || self.time_zone.is_some()
             || !self.warnings.is_empty()
+            || self.quiet
+            || self.snooze_minutes.is_some()
         {
             2
         } else {
@@ -242,6 +251,9 @@ impl Task {
                 }
             }
             _ => {}
+        }
+        if self.snooze_minutes.is_some_and(|m| m == 0 || m > 24 * 60) {
+            return Err("Snooze for between a minute and a day.".into());
         }
         if self
             .duration_minutes
@@ -575,6 +587,8 @@ mod tests {
             repeat_from: None,
             time_zone: None,
             warnings: vec![],
+            quiet: false,
+            snooze_minutes: None,
             extra: Default::default(),
         }
     }
@@ -869,6 +883,41 @@ mod tests {
                 .iter()
                 .any(|a| a.title == "Bins · today" && a.at == ms("2026-11-12T09:00:00Z"))
         );
+    }
+
+    #[test]
+    fn quiet_and_snooze_length_reach_the_alarm_list() {
+        let mut store = Store::open(":memory:").unwrap();
+        let mut alarm = task();
+        alarm.kind = Some(entries::Kind::Alarm);
+        alarm.quiet = true;
+        alarm.snooze_minutes = Some(5);
+        let id = store.save_task(None, alarm.clone()).unwrap();
+        assert_eq!(
+            store.snapshot().records[&id]
+                .task
+                .as_ref()
+                .unwrap()
+                .schema_version,
+            2
+        );
+        let a = store
+            .alarms(0)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.task_id == id)
+            .unwrap();
+        assert!(a.ring && a.quiet && a.snooze_minutes == 5);
+        let plain = store.save_task(None, task()).unwrap();
+        let p = store
+            .alarms(0)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.task_id == plain)
+            .unwrap();
+        assert!(!p.quiet && p.snooze_minutes == 10);
+        alarm.snooze_minutes = Some(0);
+        assert!(store.save_task(None, alarm).is_err());
     }
 
     #[test]

@@ -170,6 +170,8 @@ mod android {
                     "remindAt": a.remind_at,
                     "warning": a.warning,
                     "ring": a.ring,
+                    "quiet": a.quiet,
+                    "snooze": a.snooze_minutes,
                 })
             })
             .collect();
@@ -182,6 +184,7 @@ mod android {
 pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
     use tauri_plugin_notification::{NotificationExt, PermissionState};
 
+    actions::register(&app);
     // Warnings fire as their time passes while the app runs; ones missed while it was closed are
     // not sent late, matching the missed-reminder rule.
     let mut checked = now_ms();
@@ -195,7 +198,14 @@ pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
                 continue;
             }
             // Alarms ring from the app itself, so they need no notification permission.
-            ring::start(&app, &id, &task.title, due);
+            ring::start(
+                &app,
+                &id,
+                &task.title,
+                due,
+                task.quiet,
+                task.snooze_minutes.unwrap_or(10),
+            );
             if let Err(error) = store.mark_notified(&id, due) {
                 report(&app, format!("Could not save alarm receipt: {error}"));
             }
@@ -219,6 +229,10 @@ pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
                 .builder()
                 .title(TITLE)
                 .body(&task.title)
+                .action_type_id(actions::TYPE)
+                .extra("taskId", &id)
+                .extra("remindAt", due)
+                .extra("snooze", task.snooze_minutes.unwrap_or(10))
                 .show();
             if shown.is_err() {
                 continue;
@@ -256,6 +270,8 @@ pub mod ring {
         pub task_id: String,
         pub title: String,
         pub at: i64,
+        pub quiet: bool,
+        pub snooze_minutes: u32,
         #[serde(skip)]
         stop: Arc<AtomicBool>,
     }
@@ -285,12 +301,21 @@ pub mod ring {
         })
     }
 
-    pub fn start(app: &AppHandle, task_id: &str, title: &str, at: i64) {
+    pub fn start(
+        app: &AppHandle,
+        task_id: &str,
+        title: &str,
+        at: i64,
+        quiet: bool,
+        snooze_minutes: u32,
+    ) {
         stop();
         let ringing = Ringing {
             task_id: task_id.into(),
             title: title.into(),
             at,
+            quiet,
+            snooze_minutes,
             stop: Arc::new(AtomicBool::new(false)),
         };
         if let Ok(mut slot) = RINGING.lock() {
@@ -312,7 +337,8 @@ pub mod ring {
         std::thread::spawn(move || {
             let started = now_ms();
             while !flag.load(Ordering::SeqCst) && now_ms() - started < LIMIT_MS {
-                if !play_once() {
+                // A quiet alarm shows the band without sound.
+                if quiet || !play_once() {
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
             }
@@ -342,7 +368,11 @@ pub mod ring {
             let mut store = state.store.lock().await;
             let now = now_ms();
             if snooze {
-                store.snooze(&ringing.task_id, now, now + 10 * 60_000)?;
+                store.snooze(
+                    &ringing.task_id,
+                    now,
+                    now + i64::from(ringing.snooze_minutes) * 60_000,
+                )?;
             } else {
                 let action = nothingtodo_core::alarms::NotificationAction::Complete;
                 store.apply_notification_action(&ringing.task_id, ringing.at, &action, now)?;
@@ -351,5 +381,72 @@ pub mod ring {
         state.edited();
         let _ = app.emit("tasks-changed", ());
         Ok(())
+    }
+}
+
+/// Complete and Snooze buttons on desktop reminder notifications. The app is running whenever it
+/// shows one, so a press is applied to the store straight away.
+#[cfg(not(target_os = "android"))]
+mod actions {
+    use super::{AppState, now_ms, report};
+    use tauri::{AppHandle, Emitter, Manager};
+    use tauri_plugin_notification::{Action, ActionType, NotificationExt};
+
+    pub const TYPE: &str = "nothingtodo-reminder";
+
+    pub fn register(app: &AppHandle) {
+        let buttons = ActionType::builder(TYPE)
+            .actions(vec![
+                Action::builder("complete", "Complete").build(),
+                Action::builder("snooze", "Snooze").build(),
+            ])
+            .build();
+        if let Err(error) = app.notification().register_action_types(vec![buttons]) {
+            report(app, format!("Notification buttons unavailable: {error}"));
+        }
+        let handle = app.clone();
+        let listening = app.notification().on_action(move |pressed| {
+            let Some(extra) = pressed.notification().map(|n| n.extra().clone()) else {
+                return;
+            };
+            let task_id = extra
+                .get("taskId")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let remind_at = extra.get("remindAt").and_then(|v| v.as_i64());
+            let minutes = extra.get("snooze").and_then(|v| v.as_i64()).unwrap_or(10);
+            let app = handle.clone();
+            match (pressed.action_id(), task_id, remind_at) {
+                ("tap", _, _) => crate::window::show_main(&app),
+                (action @ ("complete" | "snooze"), Some(id), Some(at)) => {
+                    let action = action.to_string();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app.state::<AppState>();
+                        let done = {
+                            let mut store = state.store.lock().await;
+                            let now = now_ms();
+                            if action == "complete" {
+                                let complete =
+                                    nothingtodo_core::alarms::NotificationAction::Complete;
+                                store
+                                    .apply_notification_action(&id, at, &complete, now)
+                                    .map(|_| ())
+                            } else {
+                                store.snooze(&id, now, now + minutes * 60_000)
+                            }
+                        };
+                        if let Err(error) = done {
+                            report(&app, error);
+                        }
+                        state.edited();
+                        let _ = app.emit("tasks-changed", ());
+                    });
+                }
+                _ => {}
+            }
+        });
+        if let Err(error) = listening {
+            report(app, format!("Notification buttons unavailable: {error}"));
+        }
     }
 }

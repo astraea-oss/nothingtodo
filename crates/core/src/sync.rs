@@ -548,6 +548,8 @@ mod tests {
             repeat_from: None,
             time_zone: None,
             warnings: vec![],
+            quiet: false,
+            snooze_minutes: None,
             extra: Default::default(),
         }
     }

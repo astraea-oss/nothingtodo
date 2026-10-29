@@ -21,6 +21,8 @@ fn task(i: usize) -> Task {
         repeat_from: None,
         time_zone: None,
         warnings: vec![],
+        quiet: false,
+        snooze_minutes: None,
         extra: Default::default(),
     }
 }

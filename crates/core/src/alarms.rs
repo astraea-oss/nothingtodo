@@ -23,6 +23,10 @@ pub struct Alarm {
     pub warning: bool,
     /// An alarm: it rings until stopped rather than showing one notification.
     pub ring: bool,
+    /// Silent notification, or an alarm that only vibrates.
+    pub quiet: bool,
+    /// What Snooze delays it by.
+    pub snooze_minutes: u32,
 }
 
 struct Planned {
@@ -33,6 +37,8 @@ struct Planned {
     title: String,
     warning: bool,
     ring: bool,
+    quiet: bool,
+    snooze_minutes: u32,
 }
 
 /// "45 min", "2 h", "1 day", "1 week" for warning texts.
@@ -111,6 +117,8 @@ impl Store {
                     title: task.title.clone(),
                     warning: false,
                     ring: task.kind() == crate::entries::Kind::Alarm,
+                    quiet: task.quiet,
+                    snooze_minutes: task.snooze_minutes.unwrap_or(10),
                 });
             }
             let Ok(Some(base)) = task.warn_base() else {
@@ -130,6 +138,8 @@ impl Store {
                     title: format!("{} · {label}", task.title),
                     warning: true,
                     ring: false,
+                    quiet: task.quiet,
+                    snooze_minutes: task.snooze_minutes.unwrap_or(10),
                 });
             }
         }
@@ -175,6 +185,8 @@ impl Store {
                 title: p.title,
                 warning: p.warning,
                 ring: p.ring,
+                quiet: p.quiet,
+                snooze_minutes: p.snooze_minutes,
             })
             .collect();
         if ids != self.state.notification_ids {
@@ -243,6 +255,8 @@ mod tests {
             repeat_from: None,
             time_zone: None,
             warnings: vec![],
+            quiet: false,
+            snooze_minutes: None,
             extra: Default::default(),
         }
     }
