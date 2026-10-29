@@ -213,13 +213,36 @@ type Entry = [string, TaskRecord];
 // ── Typing in the bar: "Call the bank fri 8am" ──
 const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 const FULL_DAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-interface Parsed { title: string; day: number | null; minutes: number | null }
+interface Parsed {
+  title: string; day: number | null; minutes: number | null;
+  alarm: boolean; repeat: Repeat | null; warnings: number[]; duration: number | null;
+}
+// "45m", "2h", "1h30", "3d", "1w", "6mo" as minutes; null if it is not a duration.
+function minutesOf(word: string): number | null {
+  const mixed = /^(\d+)h(\d{1,2})$/.exec(word);
+  if (mixed) return Number(mixed[1]) * 60 + Number(mixed[2]);
+  const m = /^(\d+)\s*(m|min|mins|h|hr|hrs|hour|hours|d|day|days|w|wk|wks|week|weeks)$/.exec(word);
+  if (!m) return null;
+  const n = Number(m[1]), unit = m[2][0];
+  return n * ({ m: 1, h: 60, d: 1440, w: 10080 } as Record<string, number>)[unit];
+}
+const UNITS: Record<string, 'day' | 'week' | 'month' | 'year'> = {
+  day: 'day', days: 'day', d: 'day', week: 'week', weeks: 'week', wk: 'week', wks: 'week', w: 'week',
+  month: 'month', months: 'month', mo: 'month', year: 'year', years: 'year', y: 'year',
+};
+const weekdayOf = (w: string) => { const i = Math.max(DAYS.indexOf(w), FULL_DAYS.indexOf(w)); return i < 0 ? null : i === 0 ? 7 : i; };
+
+// Typing in the bar fills the same fields as the sheet: "Gym weekdays 7am warn 10m",
+// "Call the bank fri 8am", "Bins weekly", "Dentist tue 9am for 45m", "Wake up 6:30 alarm".
 function parse(text: string): Parsed {
-  let day: number | null = null, minutes: number | null = null;
+  let day: number | null = null, minutes: number | null = null, repeat: Repeat | null = null, duration: number | null = null;
+  let alarmWord: string | null = null;
+  const warnings: number[] = [];
   const today = startOfDay(Date.now());
   const kept: string[] = [];
-  for (const word of text.trim().split(/\s+/).filter(Boolean)) {
-    const w = word.toLowerCase();
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i], w = word.toLowerCase();
     // A time needs am/pm or a separator, so "2 bins" stays in the title.
     const time = /^(\d{1,2})(?:[:.](\d{2}))?(am|pm)?$/.exec(w);
     if (time && (time[2] || time[3]) && minutes === null) {
@@ -231,12 +254,61 @@ function parse(text: string): Parsed {
     }
     if (day === null && (w === 'today' || w === 'tod')) { day = today; continue; }
     if (day === null && (w === 'tomorrow' || w === 'tmr' || w === 'tom')) { day = addDays(today, 1); continue; }
-    const index = Math.max(DAYS.indexOf(w), FULL_DAYS.indexOf(w));
-    if (day === null && index >= 0) { day = addDays(today, (index - new Date(today).getDay() + 7) % 7); continue; }
+    if (repeat === null) {
+      const named: Record<string, Repeat> = {
+        daily: { type: 'calendar', unit: 'day', every: 1 }, everyday: { type: 'calendar', unit: 'day', every: 1 },
+        weekdays: { type: 'calendar', unit: 'day', every: 1, weekdays: [1, 2, 3, 4, 5] },
+        weekends: { type: 'calendar', unit: 'day', every: 1, weekdays: [6, 7] },
+        weekly: { type: 'calendar', unit: 'week', every: 1 }, fortnightly: { type: 'calendar', unit: 'week', every: 2 },
+        monthly: { type: 'calendar', unit: 'month', every: 1 }, yearly: { type: 'calendar', unit: 'year', every: 1 },
+        annually: { type: 'calendar', unit: 'year', every: 1 },
+      };
+      if (named[w]) { repeat = named[w]; continue; }
+      if (w === 'every' && i + 1 < words.length) {
+        const next = words[i + 1].toLowerCase();
+        // "every mon wed": weekly on those days.
+        const set: number[] = [];
+        let j = i + 1;
+        while (j < words.length && weekdayOf(words[j].toLowerCase()) !== null) set.push(weekdayOf(words[j++].toLowerCase())!);
+        if (set.length) { repeat = { type: 'calendar', unit: 'week', every: 1, weekdays: [...new Set(set)].sort() }; i = j - 1; continue; }
+        if (next === 'day') { repeat = { type: 'calendar', unit: 'day', every: 1 }; i++; continue; }
+        // "every 3 days", "every 2 weeks", "every 8h", "every 28d"
+        const count = /^(\d+)([a-z]*)$/.exec(next);
+        if (count) {
+          const n = Number(count[1]);
+          const unitWord = count[2] || (words[i + 2] ?? '').toLowerCase();
+          const consumed = count[2] ? 1 : 2;
+          if (unitWord === 'h' || unitWord === 'hours' || unitWord === 'hrs') { repeat = { type: 'fixed', minutes: n * 60 }; i += consumed; continue; }
+          if (UNITS[unitWord] && n > 0) { repeat = { type: 'calendar', unit: UNITS[unitWord], every: n }; i += consumed; continue; }
+        }
+      }
+    }
+    if (w === 'warn') {
+      let j = i + 1;
+      while (j < words.length && minutesOf(words[j].toLowerCase()) !== null) warnings.push(minutesOf(words[j++].toLowerCase())!);
+      if (j > i + 1) { i = j - 1; continue; }
+    }
+    if (w === 'for' && duration === null && i + 1 < words.length && minutesOf(words[i + 1].toLowerCase()) !== null) {
+      duration = minutesOf(words[i + 1].toLowerCase()); i++; continue;
+    }
+    if (w === '!!' || (w === 'alarm' && kept.length)) { alarmWord = word; continue; }
+    const index = weekdayOf(w);
+    if (day === null && index !== null) { day = addDays(today, ((index % 7) - new Date(today).getDay() + 7) % 7); continue; }
     if (w === 'at' && kept.length) continue;
     kept.push(word);
   }
-  return { title: kept.join(' '), day, minutes };
+  // "alarm" only means the type when there is a time to ring at; otherwise it is a word.
+  const alarm = alarmWord !== null && (minutes !== null || alarmWord === '!!');
+  if (alarmWord !== null && !alarm) kept.push(alarmWord);
+  // A weekday repeat without a day starts on the next day in its set.
+  if (day === null && repeat?.type === 'calendar' && repeat.weekdays?.length) {
+    for (let k = 0; k < 7; k++) {
+      const d = addDays(today, k), wd = ((new Date(d).getDay() + 6) % 7) + 1;
+      const passed = k === 0 && minutes !== null && minutes <= new Date().getHours() * 60 + new Date().getMinutes();
+      if (repeat.weekdays.includes(wd) && !passed) { day = d; break; }
+    }
+  }
+  return { title: kept.join(' '), day, minutes, alarm, repeat, warnings: [...new Set(warnings)], duration };
 }
 // Markers are local dates: midnight of that day here, whatever the time zone.
 function markerDay(record: TaskRecord) {
@@ -247,6 +319,8 @@ function quickTarget(parsed: Parsed) {
   if (parsed.minutes === null) return null;
   const d = new Date(parsed.day ?? selectedDay);
   d.setHours(Math.floor(parsed.minutes / 60), parsed.minutes % 60, 0, 0);
+  // With no day typed, a time already past today means tomorrow.
+  if (parsed.day === null && d.getTime() <= Date.now() && startOfDay(d.getTime()) === startOfDay(Date.now())) d.setDate(d.getDate() + 1);
   return d.getTime();
 }
 
@@ -608,9 +682,15 @@ function renderHint(parsed = parse(quick.value), target = quickTarget(parsed)) {
   const hint = $<HTMLElement>('#hint');
   if (hint.classList.contains('message')) return;
   hint.classList.toggle('red', target !== null);
+  const extras = [
+    parsed.alarm ? 'alarm' : '',
+    parsed.repeat ? repeatText(parsed.repeat).join(' ').trim().toLowerCase() : '',
+    parsed.warnings.length ? `warn ${[...parsed.warnings].sort((a, b) => b - a).map(w => spanText(w).toLowerCase()).join(' ')}` : '',
+    parsed.duration ? durationText(parsed.duration).join(' ').trim() : '',
+  ].filter(Boolean).map(x => ` · ${x}`).join('');
   hint.textContent = !quick.value.trim() ? `↵ adds to ${shortDay(selectedDay)}`
-    : target !== null ? `→ ${longDay(startOfDay(target))} · ${clock(target)}`
-    : `↵ adds to ${longDay(parsed.day ?? selectedDay)} · all day`;
+    : target !== null ? `→ ${longDay(startOfDay(target))} · ${clock(target)}${extras}`
+    : `↵ adds to ${longDay(parsed.day ?? selectedDay)} · all day${extras}`;
 }
 
 // ── Input bar ──
@@ -623,10 +703,15 @@ $<HTMLFormElement>('#quick').addEventListener('submit', event => {
     const remindAt = quickTarget(parsed);
     const day = remindAt !== null ? startOfDay(remindAt) : parsed.day ?? selectedDay;
     quick.value = '';
-    // A time makes a reminder; without one it is a marker on that day.
-    await save(null, remindAt !== null
-      ? { schemaVersion: 1, title: parsed.title, notes: '', completed: false, remindAt }
-      : { schemaVersion: 2, title: parsed.title, notes: '', completed: false, remindAt: null, kind: 'marker', date: isoDate(day) });
+    // A time makes a reminder (or an alarm); without one it is a marker on that day.
+    await save(null, {
+      schemaVersion: 1, title: parsed.title, notes: '', completed: false, remindAt,
+      ...(remindAt === null ? { kind: 'marker' as const, date: isoDate(day) } : parsed.alarm ? { kind: 'alarm' as const } : {}),
+      ...(parsed.repeat ? { repeat: parsed.repeat } : {}),
+      ...(parsed.warnings.length ? { warnings: parsed.warnings } : {}),
+      ...(parsed.duration ? { durationMinutes: parsed.duration } : {}),
+      ...(parsed.repeat || parsed.warnings.length ? { timeZone: zone } : {}),
+    });
     goToDay(day);
     await askForNotifications(remindAt);
   });
@@ -729,7 +814,8 @@ function repeatText(r: Repeat | null): [string, string] {
   if (days.length && days.length < 7) {
     if (days.join() === '1,2,3,4,5') return ['Mon–Fri', ''];
     if (days.join() === '6,7') return ['Weekends', ''];
-    return [days.map(d => WEEKDAYS[d - 1]).join(''), r.unit === 'week' && r.every > 1 ? `every ${r.every} wk` : ''];
+    const names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return [days.length <= 3 ? days.map(d => names[d - 1]).join(' ') : days.map(d => WEEKDAYS[d - 1]).join(''), r.unit === 'week' && r.every > 1 ? `every ${r.every} wk` : ''];
   }
   if (r.unit === 'day') return r.every === 1 ? ['Daily', ''] : [String(r.every), 'd'];
   if (r.unit === 'week') return r.every === 1 ? ['Weekly', ''] : [String(r.every), 'wk'];
@@ -1080,12 +1166,12 @@ function openSheet(id: string | null) {
   const marked = record ? markerDay(record) : null;
   const timed = task?.remindAt ?? barTime;
   draft = {
-    kind: task?.kind === 'marker' || task?.kind === 'alarm' ? task.kind : 'reminder',
+    kind: task?.kind === 'marker' || task?.kind === 'alarm' ? task.kind : fromBar?.alarm ? 'alarm' : 'reminder',
     day: marked ?? (timed !== null ? startOfDay(timed) : fromBar?.day ?? Math.max(selectedDay, startOfDay(Date.now()))),
     minutes: timed !== null && task?.kind !== 'marker' ? new Date(timed).getHours() * 60 + new Date(timed).getMinutes() : null,
-    duration: task?.durationMinutes ?? null,
-    repeat: task?.repeat ?? null,
-    warnings: task?.warnings ?? [],
+    duration: task?.durationMinutes ?? fromBar?.duration ?? null,
+    repeat: task?.repeat ?? fromBar?.repeat ?? null,
+    warnings: task?.warnings ?? fromBar?.warnings ?? [],
     notes: task?.notes ?? '',
   };
   titleInput.value = task?.title ?? fromBar?.title ?? '';
