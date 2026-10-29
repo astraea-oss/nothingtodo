@@ -21,6 +21,8 @@ pub struct Alarm {
     pub title: String,
     /// A warning before the entry rather than the entry itself; it has no Complete or Snooze.
     pub warning: bool,
+    /// An alarm: it rings until stopped rather than showing one notification.
+    pub ring: bool,
 }
 
 struct Planned {
@@ -30,6 +32,7 @@ struct Planned {
     remind_at: i64,
     title: String,
     warning: bool,
+    ring: bool,
 }
 
 /// "45 min", "2 h", "1 day", "1 week" for warning texts.
@@ -107,6 +110,7 @@ impl Store {
                     remind_at,
                     title: task.title.clone(),
                     warning: false,
+                    ring: task.kind() == crate::entries::Kind::Alarm,
                 });
             }
             let Ok(Some(base)) = task.warn_base() else {
@@ -125,6 +129,7 @@ impl Store {
                     remind_at: task.remind_at.unwrap_or(base),
                     title: format!("{} · {label}", task.title),
                     warning: true,
+                    ring: false,
                 });
             }
         }
@@ -169,6 +174,7 @@ impl Store {
                 remind_at: p.remind_at,
                 title: p.title,
                 warning: p.warning,
+                ring: p.ring,
             })
             .collect();
         if ids != self.state.notification_ids {

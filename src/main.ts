@@ -269,6 +269,27 @@ function renderHeader(shownDay: number, preview: boolean) {
   }
 }
 
+// ── A desktop alarm ringing now (Android shows its own full-screen alarm) ──
+interface Ringing { taskId: string; title: string; at: number }
+let ringing: Ringing | null = null;
+function ringingBlock(r: Ringing) {
+  const box = el('div', 'ringing');
+  box.append(el('span', 'lbl', `Alarm · ${clock(r.at)}`), el('p', 'ring-title', r.title));
+  const actions = el('div', 'row-actions');
+  // Stopping takes a press-and-hold, as in the design, so a stray tap cannot silence it.
+  const stop = el('button', 'pill on', 'Hold to stop');
+  stop.type = 'button';
+  let hold = 0;
+  stop.addEventListener('pointerdown', () => {
+    stop.textContent = 'Hold…';
+    hold = window.setTimeout(() => { void run(() => invoke('answer_alarm', { snooze: false })); }, 900);
+  });
+  for (const end of ['pointerup', 'pointerleave', 'pointercancel']) stop.addEventListener(end, () => { clearTimeout(hold); stop.textContent = 'Hold to stop'; });
+  actions.append(stop, pill('Snooze 10m', () => invoke('answer_alarm', { snooze: true })));
+  box.append(actions);
+  return box;
+}
+
 function band(label: string, count: string, className = '', onClick?: () => void, day?: number) {
   const b = el(onClick ? 'button' : 'div', `gt-band ${className}`);
   if (day !== undefined) b.dataset.day = String(day);
@@ -288,12 +309,14 @@ function row(id: string, record: TaskRecord, now: number, showDay = false) {
   const readOnly = record.unsupported !== null;
   const due = reminderAt(record);
   const marker = task?.kind === 'marker';
+  const alarm = task?.kind === 'alarm';
   const done = !!task?.completed;
   const late = !done && due !== null && due <= now;
   const line = el('div', 'gt-row');
   line.classList.toggle('open', expanded === id);
-  // The node on the rail is the checkbox; markers are squares.
-  const node = el('button', `node${marker ? ' mk' : ''}${done ? ' x' : ''}${late ? ' r' : ''}`);
+  // The node on the rail is the checkbox: a hollow ring, a square for markers, a filled double
+  // ring for alarms.
+  const node = el('button', `node${marker ? ' mk' : alarm ? ' al' : ''}${done ? ' x' : ''}${late ? ' r' : ''}`);
   node.type = 'button';
   node.disabled = readOnly || !task;
   node.setAttribute('aria-label', done ? `Reopen ${task?.title}` : `Complete ${task?.title ?? 'task'}`);
@@ -312,6 +335,7 @@ function row(id: string, record: TaskRecord, now: number, showDay = false) {
   const time = marker && markedDay !== null ? (showDay ? shortDay(markedDay) : 'all day')
     : due === null ? '—' : clock(due);
   const title = el('span', `t${done ? ' done' : ''}`, task?.title ?? (readOnly ? 'From a newer app version' : 'Deleted on this device'));
+  if (alarm && !done) title.append(el('span', 'tag', 'rings'));
   // Sync glyphs: synced is silent, pending a ring, conflict a red dot.
   const sy = el('span', record.conflict ? 'sy c' : record.dirty && sync.connected ? 'sy p' : 'sy');
   const tm = el('span', `tm${marker ? ' ad' : ''}${late ? ' red' : done ? ' dim' : ''}`);
@@ -382,6 +406,7 @@ function render() {
   const entries = (Object.entries(data.records) as Entry[])
     .sort((a, b) => (reminderAt(a[1]) ?? Infinity) - (reminderAt(b[1]) ?? Infinity) || (a[1].task?.title ?? '').localeCompare(b[1].task?.title ?? ''));
   if (notificationsOff) band('Notifications off · turn on ›', '', 'red', () => { void run(enableNotifications); });
+  if (ringing) gutter.append(ringingBlock(ringing));
 
   // Records needing a decision always show, whatever the day.
   const attention = entries.filter(([, r]) => r.conflict || (r.unsupported && !r.task));
@@ -609,7 +634,7 @@ $<HTMLDivElement>('#strip').addEventListener('touchend', event => {
 
 // ── The add sheet: one view (revised from the deck's B, 2026-10-29): the short sheet's top half, then
 // compact tiles that open in place (B1) with the B2 instruments inside. ──
-type Kind = 'reminder' | 'marker';
+type Kind = 'reminder' | 'marker' | 'alarm';
 interface Draft { kind: Kind; day: number; minutes: number | null; duration: number | null; repeat: Repeat | null; warnings: number[]; notes: string }
 let draft: Draft = { kind: 'reminder', day: startOfDay(Date.now()), minutes: null, duration: null, repeat: null, warnings: [], notes: '' };
 let openTile: string | null = null;
@@ -618,7 +643,7 @@ const titleInput = $<HTMLInputElement>('#sheet-title');
 const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const at = (day: number, minutes: number) => { const d = new Date(day); d.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0); return d.getTime(); };
-const draftTime = () => (draft.kind === 'reminder' && draft.minutes !== null ? at(draft.day, draft.minutes) : null);
+const draftTime = () => (draft.kind !== 'marker' && draft.minutes !== null ? at(draft.day, draft.minutes) : null);
 function durationText(m: number) { return m < 60 ? [String(m), 'min'] : m % 60 ? [`${Math.floor(m / 60)}h${two(m % 60)}`, ''] : [String(m / 60), m === 60 ? 'hour' : 'hours']; }
 function spanText(m: number) { return m === 0 ? 'Day of' : m % 10080 === 0 ? `${m / 10080}W` : m % 1440 === 0 ? `${m / 1440}D` : m % 60 === 0 ? `${m / 60}H` : `${m}M`; }
 const WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
@@ -648,6 +673,7 @@ function draftTask(): Task {
     ...rest, schemaVersion: 1, title: titleInput.value, notes: draft.notes,
     completed: existing?.completed ?? false, remindAt: marker ? null : timed,
     ...(marker ? { kind: 'marker' as const, date: isoDate(draft.day) } : {}),
+    ...(draft.kind === 'alarm' ? { kind: 'alarm' as const } : {}),
     ...(draft.duration ? { durationMinutes: draft.duration } : {}),
     ...(draft.repeat ? { repeat: draft.repeat } : {}),
     ...(draft.warnings.length ? { warnings: [...draft.warnings].sort((a, b) => b - a) } : {}),
@@ -659,7 +685,7 @@ let previewTimer = 0;
 function refreshPreview() {
   clearTimeout(previewTimer);
   preview = [];
-  if (!draft.repeat || (draft.kind === 'reminder' && draft.minutes === null) || !isTauri()) return;
+  if (!draft.repeat || (draft.kind !== 'marker' && draft.minutes === null) || !isTauri()) return;
   previewTimer = window.setTimeout(async () => {
     try { preview = await invoke<number[]>('preview_occurrences', { task: { ...draftTask(), title: titleInput.value || 'Preview', schemaVersion: 2 }, count: 3 }); }
     catch { preview = []; }
@@ -917,17 +943,16 @@ function whenEditor() {
 
 function keys() {
   const wrap = el('div', 'keys');
-  const alarm = el('button', 'key', 'Alarm');
-  alarm.type = 'button'; alarm.disabled = true; alarm.title = 'Alarms arrive once they can ring until stopped';
-  alarm.prepend(el('i', 'node al'));
-  wrap.append(alarm);
-  for (const k of ['reminder', 'marker'] as const) {
-    const b = choice(k === 'reminder' ? 'Reminder' : 'Marker', draft.kind === k, () => {
+  const names = { alarm: 'Alarm', reminder: 'Reminder', marker: 'Marker' } as const;
+  for (const k of ['alarm', 'reminder', 'marker'] as const) {
+    const b = choice(names[k], draft.kind === k, () => {
       draft.kind = k;
+      // An alarm needs a time; offer the next half hour.
+      if (k === 'alarm' && draft.minutes === null) draft.minutes = Math.ceil((new Date().getHours() * 60 + new Date().getMinutes() + 1) / 30) * 30 % 1440;
       if (k === 'marker') { draft.minutes = null; draft.warnings = draft.warnings.filter(w => w === 0 || w % 1440 === 0); if (draft.repeat?.type === 'fixed') draft.repeat = null; }
       else draft.warnings = draft.warnings.filter(w => w !== 0);
     }, 'key');
-    b.prepend(el('i', `node${k === 'marker' ? ' mk' : ''}`));
+    b.prepend(el('i', `node${k === 'marker' ? ' mk' : k === 'alarm' ? ' al' : ''}`));
     wrap.append(b);
   }
   return wrap;
@@ -966,7 +991,9 @@ function renderSheet() {
   $('#when-edit').replaceChildren(...(openTile === 'when' && !marker ? [whenEditor()] : []));
   $('#day-chips').replaceWith(Object.assign(dayChips(), { id: 'day-chips' }));
   $<HTMLDivElement>('#tiles').replaceChildren(...TILES.map(tile));
-  $('#sheet-submit').textContent = editing ? 'Save' : `Add ${marker ? 'marker' : 'reminder'}`;
+  $('#sheet-submit').textContent = editing ? 'Save' : `Add ${draft.kind}`;
+  // Desktop alarms ring from the running app only; say so where it matters.
+  $('#delivery-hint').textContent = deliveryHint + (draft.kind === 'alarm' && !android ? ' Alarms ring only while NothingToDo is running.' : '');
 }
 
 function openSheet(id: string | null) {
@@ -978,7 +1005,7 @@ function openSheet(id: string | null) {
   const marked = record ? markerDay(record) : null;
   const timed = task?.remindAt ?? barTime;
   draft = {
-    kind: task ? (task.kind === 'marker' ? 'marker' : 'reminder') : 'reminder',
+    kind: task?.kind === 'marker' || task?.kind === 'alarm' ? task.kind : 'reminder',
     day: marked ?? (timed !== null ? startOfDay(timed) : fromBar?.day ?? Math.max(selectedDay, startOfDay(Date.now()))),
     minutes: timed !== null && task?.kind !== 'marker' ? new Date(timed).getHours() * 60 + new Date(timed).getMinutes() : null,
     duration: task?.durationMinutes ?? null,
@@ -1033,9 +1060,11 @@ form.addEventListener('submit', event => {
   });
 });
 // Android schedules reminders with the OS; desktop shows them from the running app.
-$('#delivery-hint').textContent = /Android/i.test(navigator.userAgent)
-  ? 'Times use this device’s timezone. Reminders and warnings fire even when the app is closed.'
+const android = /Android/i.test(navigator.userAgent);
+const deliveryHint = android
+  ? 'Times use this device’s timezone. Reminders, warnings and alarms fire even when the app is closed.'
   : 'Times use this device’s timezone. Reminders need the app running; closing the window keeps it in the tray.';
+$('#delivery-hint').textContent = deliveryHint;
 
 // ── Notifications ──
 async function checkNotifications() {
@@ -1170,6 +1199,8 @@ async function start() {
   await listen('tasks-changed', () => { void refresh().catch(error => status(String(error))); });
   await listen<string>('reminder-error', event => status(event.payload));
   await listen<SyncStatus>('sync-status', event => showSyncStatus(event.payload));
+  await listen<Ringing | null>('alarm-ringing', event => { ringing = event.payload; render(); });
+  ringing = await invoke<Ringing | null>('ringing_alarm');
   showSyncStatus(await invoke<SyncStatus>('sync_status'));
   await checkNotifications();
   // Reconnection and foreground signals complement the native worker's periodic retry.

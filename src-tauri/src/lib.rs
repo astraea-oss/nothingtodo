@@ -198,6 +198,27 @@ fn preview_occurrences(task: Task, count: usize) -> Result<Vec<i64>, String> {
     task.upcoming(count.min(8))
 }
 
+/// The alarm ringing on this desktop, if any.
+#[tauri::command]
+fn ringing_alarm() -> Option<serde_json::Value> {
+    #[cfg(not(target_os = "android"))]
+    return reminders::ring::current().and_then(|r| serde_json::to_value(r).ok());
+    #[cfg(target_os = "android")]
+    None
+}
+
+/// Stops (and completes) or snoozes the alarm ringing on this desktop.
+#[tauri::command]
+async fn answer_alarm(app: AppHandle, snooze: bool) -> Result<(), String> {
+    #[cfg(not(target_os = "android"))]
+    return reminders::ring::answer(&app, snooze).await;
+    #[cfg(target_os = "android")]
+    {
+        let _ = (app, snooze);
+        Ok(())
+    }
+}
+
 /// The page became visible: apply notification buttons pressed meanwhile and refresh alarms.
 #[tauri::command]
 fn refresh_reminders(app: AppHandle) {
@@ -273,6 +294,8 @@ pub fn run() {
             sync_status,
             open_notification_settings,
             preview_occurrences,
+            ringing_alarm,
+            answer_alarm,
             refresh_reminders,
             backup::export_backup,
             backup::preview_backup,

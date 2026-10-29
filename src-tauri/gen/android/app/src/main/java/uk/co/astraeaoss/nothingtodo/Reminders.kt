@@ -41,21 +41,21 @@ object Reminders {
   private const val ACTIONS_FILE = "reminder-actions.json"
   private const val CHANNEL = "reminders"
   private const val SNOOZE_MILLIS = 10 * 60 * 1000L
-  private const val ACTION_COMPLETE = "uk.co.astraeaoss.nothingtodo.COMPLETE"
-  private const val ACTION_SNOOZE = "uk.co.astraeaoss.nothingtodo.SNOOZE"
+  const val ACTION_COMPLETE = "uk.co.astraeaoss.nothingtodo.COMPLETE"
+  const val ACTION_SNOOZE = "uk.co.astraeaoss.nothingtodo.SNOOZE"
 
   /**
    * `remindAt` is the synced reminder time; `at` can be later after a snooze. A `warning` comes
    * before the entry and has no Complete or Snooze buttons.
    */
-  data class Reminder(val id: Int, val at: Long, val title: String, val taskId: String, val remindAt: Long, val warning: Boolean = false) {
+  data class Reminder(val id: Int, val at: Long, val title: String, val taskId: String, val remindAt: Long, val warning: Boolean = false, val ring: Boolean = false) {
     fun toJson(): JSONObject = JSONObject()
-      .put("id", id).put("at", at).put("title", title).put("taskId", taskId).put("remindAt", remindAt).put("warning", warning)
+      .put("id", id).put("at", at).put("title", title).put("taskId", taskId).put("remindAt", remindAt).put("warning", warning).put("ring", ring)
 
     companion object {
       fun fromJson(json: JSONObject) = Reminder(
         json.getInt("id"), json.getLong("at"), json.getString("title"),
-        json.getString("taskId"), json.getLong("remindAt"), json.optBoolean("warning", false)
+        json.getString("taskId"), json.getLong("remindAt"), json.optBoolean("warning", false), json.optBoolean("ring", false)
       )
 
       fun fromIntent(intent: Intent): Reminder? {
@@ -63,14 +63,14 @@ object Reminders {
         val taskId = intent.getStringExtra("taskId") ?: return null
         return Reminder(
           intent.getIntExtra("id", 0), intent.getLongExtra("at", 0), title, taskId,
-          intent.getLongExtra("remindAt", 0), intent.getBooleanExtra("warning", false)
+          intent.getLongExtra("remindAt", 0), intent.getBooleanExtra("warning", false), intent.getBooleanExtra("ring", false)
         )
       }
     }
 
     fun putInto(intent: Intent): Intent = intent
       .putExtra("id", id).putExtra("at", at).putExtra("title", title)
-      .putExtra("taskId", taskId).putExtra("remindAt", remindAt).putExtra("warning", warning)
+      .putExtra("taskId", taskId).putExtra("remindAt", remindAt).putExtra("warning", warning).putExtra("ring", ring)
   }
 
   @Synchronized
@@ -100,8 +100,15 @@ object Reminders {
       context, reminder.id, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
     )
     // Exact and able to wake the phone when exact alarms are allowed (USE_EXACT_ALARM, or
-    // SCHEDULE_EXACT_ALARM on Android 12); otherwise Android delivers it inexactly.
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarms.canScheduleExactAlarms()) {
+    // SCHEDULE_EXACT_ALARM on Android 12); otherwise Android delivers it inexactly. Alarms use the
+    // alarm-clock kind, which Android treats as user-facing and shows in the status bar.
+    val exact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || alarms.canScheduleExactAlarms()
+    if (reminder.ring && exact) {
+      val show = PendingIntent.getActivity(
+        context, reminder.id, Intent(context, MainActivity::class.java), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      )
+      alarms.setAlarmClock(AlarmManager.AlarmClockInfo(reminder.at, show), pending)
+    } else if (exact) {
       alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.at, pending)
     } else {
       alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, reminder.at, pending)
@@ -162,9 +169,13 @@ object Reminders {
     )
   }
 
-  @Synchronized
   fun press(context: Context, intent: Intent) {
-    val reminder = Reminder.fromIntent(intent) ?: return
+    record(context, Reminder.fromIntent(intent) ?: return, intent.action ?: return)
+  }
+
+  /** A Complete or Snooze press, from a notification button or the alarm screen. */
+  @Synchronized
+  fun record(context: Context, reminder: Reminder, action: String) {
     NotificationManagerCompat.from(context).cancel(reminder.id)
     val entry = JSONObject()
       .put("key", UUID.randomUUID().toString())
@@ -172,8 +183,9 @@ object Reminders {
       .put("title", reminder.title)
       .put("taskId", reminder.taskId)
       .put("remindAt", reminder.remindAt)
+      .put("ring", reminder.ring)
     val schedule = loadSchedule(context).filter { it.id != reminder.id }
-    when (intent.action) {
+    when (action) {
       ACTION_COMPLETE -> {
         entry.put("action", "complete")
         cancel(context, reminder.id)
@@ -213,7 +225,7 @@ object Reminders {
     return (0 until actions.length()).map { actions.getJSONObject(it) }
       .filter { it.optString("action") == "snooze" }
       .map {
-        Reminder(it.getInt("id"), it.getLong("until"), it.getString("title"), it.getString("taskId"), it.getLong("remindAt"))
+        Reminder(it.getInt("id"), it.getLong("until"), it.getString("title"), it.getString("taskId"), it.getLong("remindAt"), false, it.optBoolean("ring", false))
       }
   }
 
@@ -251,7 +263,10 @@ object Reminders {
 }
 
 class ReminderReceiver : BroadcastReceiver() {
-  override fun onReceive(context: Context, intent: Intent) = Reminders.show(context, intent)
+  override fun onReceive(context: Context, intent: Intent) {
+    val reminder = Reminders.Reminder.fromIntent(intent) ?: return
+    if (reminder.ring) AlarmService.start(context, reminder) else Reminders.show(context, intent)
+  }
 }
 
 class ReminderActionReceiver : BroadcastReceiver() {
@@ -271,6 +286,7 @@ class ScheduledReminder {
   var taskId: String = ""
   var remindAt: Long = 0
   var warning: Boolean = false
+  var ring: Boolean = false
 }
 
 @InvokeArg
@@ -296,7 +312,7 @@ class ReminderPlugin(private val activity: Activity) : Plugin(activity) {
     val args = invoke.parseArgs(ScheduleArgs::class.java)
     Reminders.replace(
       activity.applicationContext,
-      args.reminders.map { Reminders.Reminder(it.id, it.at, it.title, it.taskId, it.remindAt, it.warning) }
+      args.reminders.map { Reminders.Reminder(it.id, it.at, it.title, it.taskId, it.remindAt, it.warning, it.ring) }
     )
     invoke.resolve()
   }

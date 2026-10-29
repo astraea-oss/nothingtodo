@@ -7,6 +7,11 @@
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Alarms (Alarm.kt): a foreground service that rings, and a full-screen alarm screen. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -33,6 +38,10 @@
         <!-- Reminders scheduled with Android; see Reminders.kt. -->
         <receiver android:name=".ReminderReceiver" android:exported="false" />
         <receiver android:name=".ReminderActionReceiver" android:exported="false" />
+        <service android:name=".AlarmService" android:exported="false" android:foregroundServiceType="systemExempted" />
+        <activity android:name=".AlarmActivity" android:exported="false" android:showWhenLocked="true" android:turnScreenOn="true"
+            android:excludeFromRecents="true" android:launchMode="singleInstance" android:taskAffinity=""
+            android:theme="@style/Theme.nothingtodo" />
         <receiver android:name=".ReminderRestoreReceiver" android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

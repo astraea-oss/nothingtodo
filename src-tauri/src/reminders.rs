@@ -169,6 +169,7 @@ mod android {
                     "taskId": a.task_id,
                     "remindAt": a.remind_at,
                     "warning": a.warning,
+                    "ring": a.ring,
                 })
             })
             .collect();
@@ -187,12 +188,22 @@ pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         let now = now_ms();
+        let state = app.state::<AppState>();
+        let mut store = state.store.lock().await;
+        for (id, task, due) in store.due(now) {
+            if task.kind() != nothingtodo_core::entries::Kind::Alarm {
+                continue;
+            }
+            // Alarms ring from the app itself, so they need no notification permission.
+            ring::start(&app, &id, &task.title, due);
+            if let Err(error) = store.mark_notified(&id, due) {
+                report(&app, format!("Could not save alarm receipt: {error}"));
+            }
+        }
         if app.notification().permission_state().ok() != Some(PermissionState::Granted) {
             checked = now;
             continue;
         }
-        let state = app.state::<AppState>();
-        let mut store = state.store.lock().await;
         for (_, title) in store.warnings_between(checked, now) {
             let _ = app
                 .notification()
@@ -216,5 +227,129 @@ pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
                 report(&app, format!("Could not save reminder receipt: {error}"));
             }
         }
+    }
+}
+
+/// Desktop alarms: while the app runs, a due alarm brings the window forward and loops the
+/// system alarm sound until it is stopped or snoozed, for at most 10 minutes. Nothing rings
+/// while the app is closed.
+#[cfg(not(target_os = "android"))]
+pub mod ring {
+    use super::{AppState, now_ms};
+    use serde::Serialize;
+    use std::process::Command;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
+    use tauri::{AppHandle, Emitter, Manager};
+
+    const LIMIT_MS: i64 = 10 * 60 * 1000;
+    const SOUNDS: [&str; 2] = [
+        "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga",
+        "/usr/share/sounds/freedesktop/stereo/complete.oga",
+    ];
+
+    #[derive(Clone, Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct Ringing {
+        pub task_id: String,
+        pub title: String,
+        pub at: i64,
+        #[serde(skip)]
+        stop: Arc<AtomicBool>,
+    }
+
+    static RINGING: Mutex<Option<Ringing>> = Mutex::new(None);
+
+    pub fn current() -> Option<Ringing> {
+        RINGING.lock().ok()?.clone()
+    }
+
+    /// Plays one round of the alarm sound with whatever the desktop offers.
+    fn play_once() -> bool {
+        let file = SOUNDS.iter().find(|f| std::path::Path::new(f).exists());
+        let tries: Vec<(&str, Vec<&str>)> = match file {
+            Some(f) => vec![
+                ("pw-play", vec![*f]),
+                ("paplay", vec![*f]),
+                ("canberra-gtk-play", vec!["-i", "alarm-clock-elapsed"]),
+            ],
+            None => vec![("canberra-gtk-play", vec!["-i", "alarm-clock-elapsed"])],
+        };
+        tries.into_iter().any(|(cmd, args)| {
+            Command::new(cmd)
+                .args(args)
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+    }
+
+    pub fn start(app: &AppHandle, task_id: &str, title: &str, at: i64) {
+        stop();
+        let ringing = Ringing {
+            task_id: task_id.into(),
+            title: title.into(),
+            at,
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        if let Ok(mut slot) = RINGING.lock() {
+            *slot = Some(ringing.clone());
+        }
+        crate::window::show_main(app);
+        {
+            use tauri_plugin_notification::NotificationExt;
+            let _ = app
+                .notification()
+                .builder()
+                .title("NothingToDo alarm")
+                .body(title)
+                .show();
+        }
+        let _ = app.emit("alarm-ringing", ringing.clone());
+        let flag = ringing.stop.clone();
+        let app = app.clone();
+        std::thread::spawn(move || {
+            let started = now_ms();
+            while !flag.load(Ordering::SeqCst) && now_ms() - started < LIMIT_MS {
+                if !play_once() {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+            }
+            // Unanswered: stop ringing; the alarm stays as an overdue entry.
+            if !flag.load(Ordering::SeqCst) {
+                stop();
+                let _ = app.emit("alarm-ringing", None::<Ringing>);
+            }
+        });
+    }
+
+    pub fn stop() -> Option<Ringing> {
+        let taken = RINGING.lock().ok()?.take();
+        if let Some(r) = &taken {
+            r.stop.store(true, Ordering::SeqCst);
+        }
+        taken
+    }
+
+    /// Stop counts as done: a one-off alarm completes and a repeating one moves on. Snooze moves it
+    /// 10 minutes later on this device only.
+    pub async fn answer(app: &AppHandle, snooze: bool) -> Result<(), String> {
+        let Some(ringing) = stop() else { return Ok(()) };
+        let _ = app.emit("alarm-ringing", None::<Ringing>);
+        let state = app.state::<AppState>();
+        {
+            let mut store = state.store.lock().await;
+            let now = now_ms();
+            if snooze {
+                store.snooze(&ringing.task_id, now, now + 10 * 60_000)?;
+            } else {
+                let action = nothingtodo_core::alarms::NotificationAction::Complete;
+                store.apply_notification_action(&ringing.task_id, ringing.at, &action, now)?;
+            }
+        }
+        state.edited();
+        let _ = app.emit("tasks-changed", ());
+        Ok(())
     }
 }

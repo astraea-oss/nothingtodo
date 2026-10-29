@@ -227,8 +227,11 @@ impl Task {
             return Err("This task needs task schema 2.".into());
         }
         match self.kind() {
-            entries::Kind::Reminder if self.date.is_some() => {
-                return Err("Reminders have a time, not a date.".into());
+            entries::Kind::Reminder | entries::Kind::Alarm if self.date.is_some() => {
+                return Err("Reminders and alarms have a time, not a date.".into());
+            }
+            entries::Kind::Alarm if self.remind_at.is_none() => {
+                return Err("Alarms need a time.".into());
             }
             entries::Kind::Marker => {
                 let date = self.date.as_deref().ok_or("Markers need a date.")?;
@@ -238,8 +241,6 @@ impl Task {
                     return Err("Markers have a date, not a time.".into());
                 }
             }
-            // Ringing until stopped needs its own native path (roadmap 5a).
-            entries::Kind::Alarm => return Err("Alarms are not available yet.".into()),
             _ => {}
         }
         if self
@@ -654,10 +655,15 @@ mod tests {
         assert!(store.save_task(None, bad).is_err());
         let mut alarm = task();
         alarm.kind = Some(entries::Kind::Alarm);
+        let alarm_id = store.save_task(None, alarm.clone()).unwrap();
+        let rings = store.alarms(0).unwrap();
         assert!(
-            store.save_task(None, alarm).is_err(),
-            "alarms wait for their ringing path"
+            rings
+                .iter()
+                .any(|a| a.task_id == alarm_id && a.ring && !a.warning)
         );
+        alarm.remind_at = None;
+        assert!(store.save_task(None, alarm).is_err(), "alarms need a time");
         // A schema 1 payload cannot smuggle in schema 2 fields.
         let mut sneaky = marker;
         sneaky.schema_version = 1;
