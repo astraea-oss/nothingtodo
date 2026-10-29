@@ -14,7 +14,9 @@
     "test:core": "cargo test -p nothingtodo-core",
     "test:sync": "node scripts/test-sync.mjs",
     "package:linux": "node scripts/package-linux.mjs",
-    "package:android": "node scripts/package-android.mjs"
+    "package:android": "node scripts/package-android.mjs",
+    "baseline": "node scripts/test-sync.mjs --baseline",
+    "check:licences": "node scripts/check-licences.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
