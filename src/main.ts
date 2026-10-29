@@ -33,7 +33,10 @@ root.innerHTML = `
   <main>
     <header class="top">
       <h1 id="date-heading" class="dot"></h1>
-      <button id="open-settings" class="lbl" type="button" aria-label="Settings"></button>
+      <div class="top-right">
+        <button id="period" class="lbl" type="button" aria-label="Month view"></button>
+        <button id="open-settings" class="dots" type="button" aria-label="Settings"><i></i><i></i><i></i></button>
+      </div>
     </header>
     <div id="strip" class="strip" aria-label="Week"></div>
     <div id="gutter" class="gt"></div>
@@ -61,6 +64,17 @@ root.innerHTML = `
         <button class="btn f" type="submit"><span class="rdot"></span><span id="sheet-submit">Add reminder</span></button>
         <input type="date" id="pick-date" class="pick" tabindex="-1" aria-hidden="true">
       </form>
+    </div>
+    <div id="month" class="sheet" role="dialog" aria-modal="true" aria-labelledby="month-title" hidden>
+      <div class="panel month-panel">
+        <div class="month-head">
+          <button id="month-prev" class="icon" type="button" aria-label="Previous month">‹</button>
+          <h2 id="month-title" class="dot"></h2>
+          <button id="month-next" class="icon" type="button" aria-label="Next month">›</button>
+        </div>
+        <div class="month-days lbl"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span></div>
+        <div id="month-grid" class="month-grid"></div>
+      </div>
     </div>
     <div id="settings" class="sheet" role="dialog" aria-modal="true" aria-labelledby="settings-heading" hidden>
       <div class="panel">
@@ -237,37 +251,97 @@ function quickTarget(parsed: Parsed) {
 }
 
 // ── Rendering ──
+// Open entries on a day, for the strip and month view's dot loads: red dots are overdue.
+function loadOn(day: number, now: number) {
+  const next = addDays(day, 1);
+  const open = Object.values(data.records).filter(r => r.task && !r.task.completed && !r.unsupported);
+  const dues = open.map(reminderAt).filter((d): d is number => d !== null && d >= day && d < next);
+  const marks = open.filter(r => markerDay(r) === day).length;
+  return [...Array(marks).fill(''), ...dues.map(due => (due <= now ? 'r' : ''))] as string[];
+}
+function dayCell(day: number, shownDay: number, now: number, month: number, letter: boolean) {
+  const cell = el('button', day === shownDay ? 'on' : '');
+  cell.type = 'button';
+  const dots = loadOn(day, now);
+  cell.setAttribute('aria-label', `${new Date(day).toDateString()}, ${dots.length} entr${dots.length === 1 ? 'y' : 'ies'}`);
+  cell.setAttribute('aria-pressed', String(day === shownDay));
+  cell.classList.toggle('today', day === startOfDay(now));
+  const load = el('span', 'load');
+  for (const dot of dots.slice(0, 4)) load.append(el('i', dot));
+  if (letter) cell.append(el('span', 'lbl', new Date(day).toLocaleDateString([], { weekday: 'narrow' })));
+  cell.append(el('b', new Date(day).getMonth() !== month ? 'dim' : '', two(new Date(day).getDate())), load);
+  cell.dataset.day = String(day);
+  return cell;
+}
+
+// The strip shows six days from today (or from wherever the timeline has moved to); its seventh
+// box always opens the month view.
+let stripStart = startOfDay(Date.now());
+function stripFor(day: number) {
+  if (day >= stripStart && day < addDays(stripStart, 6)) return stripStart;
+  const today = startOfDay(Date.now());
+  return day >= today && day < addDays(today, 6) ? today : day;
+}
+
 function renderHeader(shownDay: number, preview: boolean) {
   $('#date-heading').textContent = shortDay(shownDay);
-  const label = $<HTMLButtonElement>('#open-settings');
+  const label = $<HTMLButtonElement>('#period');
   label.classList.toggle('red', preview || !!sync.error);
-  label.textContent = preview ? 'preview' : sync.error ? 'sync error ›'
+  label.textContent = preview ? 'preview' : sync.error ? 'sync error'
     : `${new Date(shownDay).toLocaleDateString([], { month: 'short', year: 'numeric' })} · wk ${isoWeek(shownDay)}`;
+  $('#open-settings').classList.toggle('red', !!sync.error);
   const strip = $<HTMLDivElement>('#strip');
   strip.replaceChildren();
   const now = Date.now();
-  const start = weekStart(shownDay);
+  const start = preview ? stripFor(shownDay) : (stripStart = stripFor(shownDay));
   const month = new Date(shownDay).getMonth();
-  for (let i = 0; i < 7; i++) {
-    const day = addDays(start, i), next = addDays(day, 1);
-    const cell = el('button', day === shownDay ? 'on' : '');
-    cell.type = 'button';
-    const open = Object.values(data.records).filter(r => r.task && !r.task.completed && !r.unsupported);
-    const dues = open.map(reminderAt).filter((d): d is number => d !== null && d >= day && d < next);
-    const marks = open.filter(r => markerDay(r) === day).length;
-    const count = dues.length + marks;
-    cell.setAttribute('aria-label', `${new Date(day).toDateString()}, ${count} entr${count === 1 ? 'y' : 'ies'}`);
-    cell.setAttribute('aria-pressed', String(day === shownDay));
-    const load = el('span', 'load');
-    const dots = [...Array(marks).fill(''), ...dues.map(due => (due <= now ? 'r' : ''))];
-    for (const dot of dots.slice(0, 4)) load.append(el('i', dot));
-    cell.append(el('span', 'lbl', new Date(day).toLocaleDateString([], { weekday: 'narrow' })),
-      el('b', new Date(day).getMonth() !== month ? 'dim' : '', two(new Date(day).getDate())), load);
-    cell.dataset.day = String(day);
+  for (let i = 0; i < 6; i++) {
+    const day = addDays(start, i);
+    const cell = dayCell(day, shownDay, now, month, true);
     cell.addEventListener('click', () => goToDay(day));
     strip.append(cell);
   }
+  const more = el('button', 'month-cell');
+  more.type = 'button';
+  more.setAttribute('aria-label', 'Month view');
+  more.append(el('span', 'lbl', 'Month'), el('b', '', new Date(shownDay).toLocaleDateString([], { month: 'short' })), el('span', 'grid-icon'));
+  more.addEventListener('click', () => openMonth(shownDay));
+  strip.append(more);
 }
+
+// ── Month view: the same day cells and dot loads; tapping a day jumps the timeline there ──
+const monthSheet = $<HTMLDivElement>('#month');
+let monthShown = startOfDay(Date.now());
+function renderMonth() {
+  const first = new Date(monthShown); first.setDate(1);
+  const start = weekStart(first.getTime());
+  const month = first.getMonth();
+  $('#month-title').textContent = first.toLocaleDateString([], { month: 'short', year: 'numeric' });
+  const grid = $<HTMLDivElement>('#month-grid');
+  grid.replaceChildren();
+  const now = Date.now();
+  for (let i = 0; i < 42; i++) {
+    const day = addDays(start, i);
+    if (i >= 35 && new Date(day).getMonth() !== month) break;
+    const cell = dayCell(day, selectedDay, now, month, false);
+    cell.addEventListener('click', () => { monthSheet.hidden = true; goToDay(day); });
+    grid.append(cell);
+  }
+}
+function openMonth(day: number) { monthShown = day; renderMonth(); monthSheet.hidden = false; }
+function stepMonth(by: number) { const d = new Date(monthShown); d.setDate(1); d.setMonth(d.getMonth() + by); monthShown = d.getTime(); renderMonth(); }
+$('#month-prev').addEventListener('click', () => stepMonth(-1));
+$('#month-next').addEventListener('click', () => stepMonth(1));
+monthSheet.addEventListener('click', event => { if (event.target === monthSheet) monthSheet.hidden = true; });
+let monthX: number | null = null;
+monthSheet.addEventListener('touchstart', event => { monthX = event.touches[0].clientX; }, { passive: true });
+monthSheet.addEventListener('touchend', event => {
+  if (monthX === null) return;
+  const dx = event.changedTouches[0].clientX - monthX;
+  monthX = null;
+  if (Math.abs(dx) > 60) stepMonth(dx < 0 ? 1 : -1);
+});
+$('#period').addEventListener('click', () => { if (sync.error) openSettings(); else openMonth(selectedDay); });
 
 // ── A desktop alarm ringing now (Android shows its own full-screen alarm) ──
 interface Ringing { taskId: string; title: string; at: number }
@@ -629,7 +703,8 @@ $<HTMLDivElement>('#strip').addEventListener('touchend', event => {
   if (swipeX === null) return;
   const dx = event.changedTouches[0].clientX - swipeX;
   swipeX = null;
-  if (Math.abs(dx) > 50) goToDay(addDays(selectedDay, dx < 0 ? 7 : -7));
+  // Six days at a time, matching the strip.
+  if (Math.abs(dx) > 50) { stripStart = addDays(stripStart, dx < 0 ? 6 : -6); goToDay(stripStart); }
 });
 
 // ── The add sheet: one view (revised from the deck's B, 2026-10-29): the short sheet's top half, then
@@ -1038,6 +1113,7 @@ $('#readout').addEventListener('click', () => { openTile = openTile === 'when' ?
 // or return false to let back leave the app.
 (window as unknown as { nothingToDoBack: () => boolean }).nothingToDoBack = () => {
   if (!settings.hidden) { closeSettings(); return true; }
+  if (!monthSheet.hidden) { monthSheet.hidden = true; return true; }
   if (!sheet.hidden && openTile) { openTile = null; renderSheet(); return true; }
   if (!sheet.hidden) { resetEditor(); return true; }
   if (quick.value) { quick.value = ''; quick.blur(); render(); return true; }

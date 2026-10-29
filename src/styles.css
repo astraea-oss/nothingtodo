@@ -32,19 +32,24 @@ main { max-width: 40rem; margin: auto; height: 100vh; height: 100dvh; display: f
 /* Header: dot date left, month and week right (opens settings) */
 .top { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px 0; }
 .top h1 { margin: 0; font: 900 30px/1 var(--dot); text-transform: uppercase; letter-spacing: .02em; }
+.top-right { display: flex; align-items: center; gap: 14px; }
 .top .lbl { border: 0; background: none; padding: 6px 0; }
+/* Settings: three dots, in the app's dot language */
+.dots { display: flex; gap: 4px; align-items: center; height: 36px; padding: 0 2px 0 6px; border: 0; background: none; }
+.dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--fg); }
+.dots.red i { background: var(--red); }
 
 /* Week strip */
 .strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; padding: 12px 12px; border-bottom: 1px solid var(--line); }
-.strip button { aspect-ratio: 1; position: relative; border: 0; border-radius: 12px; background: none; padding: 0; color: var(--fg); }
-.strip .lbl { position: absolute; top: 6px; left: 7px; font-size: 9px; letter-spacing: .08em; }
-.strip b { position: absolute; right: 7px; bottom: 14px; font: 900 21px/1 var(--dot); }
-.strip b.dim { color: var(--dim); }
-.strip .load { position: absolute; right: 8px; bottom: 6px; display: flex; gap: 3px; height: 4px; }
-.strip .load i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
-.strip .load i.r { background: var(--red); }
-.strip button.on { background: var(--fg); color: var(--bg); }
-.strip button.on .lbl { color: var(--bg); }
+.strip button, .month-grid button { aspect-ratio: 1; position: relative; border: 0; border-radius: 12px; background: none; padding: 0; color: var(--fg); }
+.strip button .lbl { position: absolute; top: 6px; left: 7px; font-size: 9px; letter-spacing: .08em; }
+.strip b, .month-grid b { position: absolute; right: 7px; bottom: 14px; font: 900 21px/1 var(--dot); }
+.strip b.dim, .month-grid b.dim { color: var(--dim); }
+.strip .load, .month-grid .load { position: absolute; right: 8px; bottom: 6px; display: flex; gap: 3px; height: 4px; }
+.strip .load i, .month-grid .load i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; }
+.strip .load i.r, .month-grid .load i.r { background: var(--red); }
+.strip button.on, .month-grid button.on { background: var(--fg); color: var(--bg); }
+.strip button.on .lbl, .month-grid button.on .lbl { color: var(--bg); }
 
 /* Gutter list: bands, rows on a dotted rail, the NOW line */
 .gt { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(8.5rem + env(safe-area-inset-bottom));
@@ -188,3 +193,18 @@ body.dragging { user-select: none; -webkit-user-select: none; }
 .ringing { position: relative; z-index: 2; margin: 8px 12px; padding: 14px 16px; border: 1.5px solid var(--red); border-radius: 18px; background: var(--surface); }
 .ringing .lbl { color: var(--red); }
 .ringing .ring-title { margin: 6px 0 4px; font-size: 20px; }
+
+/* The strip's seventh box opens the month view */
+.strip .month-cell { aspect-ratio: 1; position: relative; border: 1px dashed var(--line); border-radius: 12px; background: none; padding: 0; color: var(--fg); }
+.strip .month-cell .lbl { position: absolute; top: 6px; left: 7px; font-size: 8px; letter-spacing: .08em; }
+.strip .month-cell b { position: absolute; right: 7px; bottom: 14px; font: 900 13px/1 var(--dot); text-transform: uppercase; }
+.strip .month-cell .grid-icon { position: absolute; right: 8px; bottom: 5px; width: 13px; height: 5px; background-image: radial-gradient(var(--dim) 1px, transparent 1.3px); background-size: 4.5px 5px; }
+.strip button.today:not(.on) b, .month-grid button.today:not(.on) b { text-decoration: underline; text-decoration-color: var(--red); text-underline-offset: 3px; }
+
+/* Month view */
+.month-panel { padding-bottom: calc(26px + env(safe-area-inset-bottom)); }
+.month-head { display: flex; justify-content: space-between; align-items: center; padding: 6px 0 10px; }
+.month-head h2 { margin: 0; font: 900 26px/1 var(--dot); text-transform: uppercase; }
+.month-head .icon { border: 0; background: none; color: var(--fg); font-size: 26px; padding: 4px 12px; }
+.month-days, .month-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }
+.month-days span { text-align: center; padding-bottom: 6px; font-size: 9px; }
