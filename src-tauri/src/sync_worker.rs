@@ -1,5 +1,5 @@
 use crate::AppState;
-use nothingtodo_core::schedule::SyncSchedule;
+use nothingtodo_core::{schedule::SyncSchedule, sync::Outcome};
 use serde::Serialize;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
@@ -14,14 +14,26 @@ pub enum Trigger {
 #[serde(rename_all = "camelCase")]
 pub struct SyncStatus {
     pub connected: bool,
+    /// Credentials are in the system keyring and reconnect after a restart.
+    pub remembered: bool,
     pub syncing: bool,
+    /// A long change history is still downloading in bounded passes.
+    pub catching_up: bool,
     pub last_synced_at: Option<u64>,
     pub error: Option<String>,
     pub retry_in_seconds: Option<u64>,
+    /// Credential storage problems, shown without interrupting sync.
+    pub notice: Option<String>,
 }
 
-async fn publish(app: &tauri::AppHandle, status: SyncStatus) {
-    *app.state::<AppState>().sync_status.lock().await = status.clone();
+/// Updates the shared status and notifies the UI.
+pub async fn update(app: &tauri::AppHandle, change: impl FnOnce(&mut SyncStatus)) {
+    let state = app.state::<AppState>();
+    let status = {
+        let mut status = state.sync_status.lock().await;
+        change(&mut status);
+        status.clone()
+    };
     let _ = app.emit("sync-status", status);
 }
 
@@ -29,7 +41,6 @@ async fn publish(app: &tauri::AppHandle, status: SyncStatus) {
 pub async fn run(app: tauri::AppHandle, mut receiver: mpsc::Receiver<Trigger>) {
     let origin = Instant::now();
     let mut schedule = SyncSchedule::default();
-    let mut status = SyncStatus::default();
     loop {
         let delay = schedule.delay(origin.elapsed());
         tokio::select! {
@@ -52,34 +63,58 @@ pub async fn run(app: tauri::AppHandle, mut receiver: mpsc::Receiver<Trigger>) {
             } => {}
         }
         let state = app.state::<AppState>();
-        let client = state.sync.lock().await;
-        let Some(client) = client.as_ref() else {
+        // Hold the session lock only long enough to take a reference, so connecting or
+        // disconnecting never waits for a network request.
+        let Some(client) = state.sync.lock().await.clone() else {
+            schedule = SyncSchedule::default();
             continue;
         };
-        status.connected = true;
-        status.syncing = true;
-        status.retry_in_seconds = None;
-        publish(&app, status.clone()).await;
-        // Preserve the existing serialization between sync acknowledgements and edits.
-        let result = client.sync(&mut *state.store.lock().await).await;
-        status.syncing = false;
-        match result {
-            Ok(()) => {
-                schedule.succeeded(origin.elapsed());
-                status.error = None;
-                status.last_synced_at = Some(
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::ZERO)
-                        .as_millis() as u64,
-                );
-            }
-            Err(error) => {
-                status.error = Some(error);
-                status.retry_in_seconds = Some(schedule.failed(origin.elapsed()));
-            }
+        update(&app, |s| {
+            s.syncing = true;
+            s.retry_in_seconds = None;
+        })
+        .await;
+        // The store lock is taken only for short commits inside `sync`.
+        let result = client.sync(&state.store).await;
+        if client.is_cancelled() {
+            // A replaced or disconnected session; its result says nothing about the new one.
+            update(&app, |s| s.syncing = false).await;
+            schedule.wake(origin.elapsed());
+            continue;
         }
-        publish(&app, status.clone()).await;
+        let elapsed = origin.elapsed();
+        let retry = match &result {
+            Err(_) => Some(schedule.failed(elapsed)),
+            Ok(Outcome::MoreHistory { .. }) => {
+                schedule.wake(elapsed);
+                None
+            }
+            Ok(Outcome::Complete) => {
+                schedule.succeeded(elapsed);
+                None
+            }
+        };
+        update(&app, |s| {
+            s.syncing = false;
+            s.retry_in_seconds = retry;
+            match result {
+                Ok(outcome) => {
+                    s.error = None;
+                    s.catching_up = matches!(outcome, Outcome::MoreHistory { .. });
+                    if outcome == Outcome::Complete {
+                        s.last_synced_at = Some(
+                            SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or(Duration::ZERO)
+                                .as_millis() as u64,
+                        );
+                    }
+                }
+                Err(error) => s.error = Some(error),
+            }
+        })
+        .await;
         let _ = app.emit("tasks-changed", ());
+        crate::reminders::request(&app);
     }
 }

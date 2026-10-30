@@ -1,7 +1,8 @@
 {
   "name": "nothingtodo",
   "private": true,
-  "version": "0.1.0",
+  "license": "GPL-3.0-or-later",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,15 +12,22 @@
     "check": "tsc --noEmit",
     "check:rust": "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
     "test:core": "cargo test -p nothingtodo-core",
-    "test:sync": "node scripts/test-sync.mjs"
+    "test:sync": "node scripts/test-sync.mjs",
+    "package:linux": "node scripts/package-linux.mjs",
+    "package:android": "node scripts/package-android.mjs",
+    "baseline": "node scripts/test-sync.mjs --baseline",
+    "check:licences": "node scripts/check-licences.mjs"
   },
   "dependencies": {
+    "@fontsource/doto": "^5.3.0",
+    "@fontsource/space-grotesk": "^5.3.0",
+    "@fontsource/space-mono": "^5.3.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-notification": "^2"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",
-    "vite": "^8.0.16",
-    "typescript": "~6.0.3"
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16"
   }
 }

@@ -1,0 +1,7 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme. -->
+    <style name="Theme.nothingtodo" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Matches the page background in src/styles.css; shows behind the system bars. -->
+        <item name="android:windowBackground">@color/app_background</item>
+    </style>
+</resources>
