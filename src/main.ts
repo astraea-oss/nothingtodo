@@ -26,6 +26,7 @@ interface SyncStatus {
   connected: boolean; remembered: boolean; syncing: boolean; catchingUp: boolean; lastSyncedAt: number | null;
   error: string | null; retryInSeconds: number | null; notice: string | null;
 }
+declare const __APP_VERSION__: string, __APP_COMMIT__: string;
 interface Snapshot { records: Record<string, TaskRecord>; cursor: number; binding: string | null }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
@@ -113,6 +114,7 @@ root.innerHTML = `
             <p class="note">Copies are safe for another account. Replacing restores this profile; the current data is saved first, and changes made elsewhere since sync back in.</p>
           </div>
         </section>
+        <p id="about" class="note"></p>
       </div>
     </div>
   </main>`;
@@ -124,6 +126,7 @@ const gutter = $<HTMLDivElement>('#gutter');
 const quick = $<HTMLInputElement>('#quick-input');
 const sheet = $<HTMLDivElement>('#sheet');
 const settings = $<HTMLDivElement>('#settings');
+$('#about').textContent = `NothingToDo ${__APP_VERSION__}${__APP_COMMIT__ ? ` · build ${__APP_COMMIT__}` : ''}`;
 let data: Snapshot = { records: {}, cursor: 0, binding: null };
 let editing: string | null = null;
 let busy = false;

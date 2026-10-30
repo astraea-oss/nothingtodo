@@ -58,7 +58,15 @@ The lock fix is an early correctness task: it depends on migration support for p
   | 1,000 | 328 | 0.6 | 0.49 | 0.50 |
   | 5,000 | 1,647 | 2.8 | 3.29 | 3.45 |
 
-  1,000 events upload in 1.4 s (one PUT each) and replay into a fresh profile in 0.02 s, within one bounded pass. Over a real network, first sync is dominated by round trips: about one request per 100 events, so roughly 1 s per 1,000 events at 100 ms latency. **Budgets:** a save stays under one frame (16 ms), which the snapshot model meets up to roughly 25,000 tasks; launch-to-usable stays under 100 ms locally; the reminder check and alarm list stay under 16 ms. Phone timings are slower than this machine; rerun on the device before release.
+  1,000 events upload in 1.4 s (one PUT each) and replay into a fresh profile in 0.02 s, within one bounded pass. Over a real network, first sync is dominated by round trips: about one request per 100 events, so roughly 1 s per 1,000 events at 100 ms latency. **Budgets:** a save stays under one frame (16 ms), which the snapshot model meets up to roughly 25,000 tasks; launch-to-usable stays under 100 ms locally; the reminder check and alarm list stay under 16 ms. **On a phone (2026-10-30, A001 with a MediaTek MT6878, Android 16; the same test cross-compiled for arm64 and run from `/data/local/tmp`, two runs):**
+
+  | tasks | open ms | save ms (median) | alarm list ms |
+  |---|---|---|---|
+  | 100 | 2–4 | 2.6–3.3 | 2.3–3.9 |
+  | 1,000 | 3 | 5.4–5.7 | 5.3–5.8 |
+  | 5,000 | 11–12 | 21–24 | 24–27 |
+
+  About 2.5 ms of each save is a fixed cost (the SQLite write); the rest grows with the snapshot. Up to roughly 3,000 tasks, completed ones and tombstones included, a save stays inside one frame; at 5,000 it takes 1.5 frames. Saves run off the UI thread, so the page stays responsive either way. This is the trigger milestone 4 names, but only for very large profiles: normalization stays deferred and is reconsidered if real profiles approach a few thousand records, or if tombstone growth gets there first.
 - **Prove the Android build on a real phone.** Configure JDK/SDK/NDK, generate the project and verify launch, SQLite persistence, HTTPS sync and notification permissions. Check the pinned `reqwest`/Rustls/AWS-LC and bundled SQLite dependencies with the NDK. Change crypto providers only in response to demonstrated issues: [AWS-LC documents Android support](https://aws.github.io/aws-lc-rs/platform_support.html). Add Android compile CI after the project builds; real-device lifecycle tests remain separate.
 - **Measure existing behavior early.** Record first-sync duration and page count, database/snapshot size, lock wait time and edit/reminder responsiveness with representative small and large histories, including weak connectivity. Set performance budgets from those measurements. Recheck them after the lock fix and before deciding on normalization.
 
@@ -170,11 +178,11 @@ Acceptance: demonstrate foreground/background overlap, concurrent edits, credent
 |---|---|
 | Safe persistence and recovery | Done: numbered migrations with downgrade guard (0b), versioned backup export, restore and copy. |
 | Compatible sync and rollout rules | Done: unknown fields kept, newer schemas read-only, foreign records kept (0b); account identity marker (2). This release is the minimum supported client for schema 2 and markers. |
-| Responsive editing | Done: no lock across requests (1); baseline and budgets recorded (0a). Rerun the baseline on a phone. |
+| Responsive editing | Done: no lock across requests (1); baseline and budgets recorded (0a), on this machine and on a phone: saves stay within a frame up to about 3,000 records. |
 | Protected credentials | Done: Secret Service, Android Keystore, session-only fallback (2). |
 | Device-tested one-shot reminders with Complete/Snooze | Android: emulator-tested with the process killed and after reboot; on the real phone (Android 16) reminders arrive on time and the full-screen alarm rings and stops (2026-10-30). Linux: in-process from the tray, with Complete/Snooze buttons. Still to do: a reminder's Complete/Snooze buttons on the real phone, timezone change on a device. |
 | Documented behaviour | Missed reminders show as overdue; one-shot reminders are fixed instants; data and exports are unencrypted; stale cross-device reminders are possible; background sync is not included (3b). |
-| Packaging | Linux portable tarball and install script; Android APK. App icon done: a ring of 24 dots with the red now dot (`src-tauri/icons/icon-source.svg`, generated with `npm run tauri icon`), black adaptive background on Android. Still to do: a release signing key and a version number for the release. |
+| Packaging | Linux portable tarball and install script; Android APK. App icon done: a ring of 24 dots with the red now dot (`src-tauri/icons/icon-source.svg`, generated with `npm run tauri icon`), black adaptive background on Android. Version 0.2.0 (2026-10-30), shown with its commit at the bottom of Settings (a `+` marks uncommitted changes). Still to do: a release signing key, deferred for now. |
 
 Ship after the relevant checkpoints above demonstrate safe persistence/recovery, compatible sync and rollout rules, responsive editing, protected credentials (with an explicit session-only fallback), and device-tested one-shot reminders with Complete/Snooze actions. Document missed reminders, fixed-instant timezone behavior, encryption status and stale cross-device alarms. Finish initial-channel packaging, branding/icons, a release signing key, and release validation here; styling need not wait for the later work below.
 

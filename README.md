@@ -43,7 +43,7 @@ Needs a JDK 17, the Android SDK (platform 36+, build tools, platform tools) and 
 
 ```sh
 npm run package:android   # release/NothingToDo-<version>-android-arm64.apk (optimized)
-adb install -r release/NothingToDo-0.1.0-android-arm64.apk
+adb install -r release/NothingToDo-0.2.0-android-arm64.apk
 ```
 
 Or copy the APK to the phone and open it (allow installing from that app when asked). For a development build with WebView debugging, export the three variables above and run `npm run tauri android dev` or `npm run tauri android build -- --debug --apk --target aarch64`.
