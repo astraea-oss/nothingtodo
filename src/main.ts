@@ -365,8 +365,12 @@ function renderHeader(shownDay: number, preview: boolean) {
   $('#date-heading').textContent = shortDay(shownDay);
   const label = $<HTMLButtonElement>('#period');
   label.classList.toggle('red', preview || !!sync.error);
-  label.textContent = preview ? 'preview' : sync.error ? 'sync error'
-    : `${new Date(shownDay).toLocaleDateString([], { month: 'short', year: 'numeric' })} · wk ${isoWeek(shownDay)}`;
+  if (preview || sync.error) label.textContent = preview ? 'preview' : 'sync error';
+  else {
+    // The year and "wk" are spans so the narrow layout can drop them ("OCT · 44").
+    const d = new Date(shownDay);
+    label.replaceChildren(d.toLocaleDateString([], { month: 'short' }), el('span', 'yr', ` ${d.getFullYear()}`), ' · ', el('span', 'wk', 'wk '), String(isoWeek(shownDay)));
+  }
   $('#open-settings').classList.toggle('red', !!sync.error);
   const strip = $<HTMLDivElement>('#strip');
   strip.replaceChildren();

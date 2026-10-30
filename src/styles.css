@@ -217,3 +217,82 @@ body.dragging { user-select: none; -webkit-user-select: none; }
 .stepper .dot.big.small { min-width: 2ch; text-align: center; }
 .pgrid button.ghost { background: none; border: 1px dashed var(--line); color: var(--dim); }
 .pgrid button.ghost.on { border-color: var(--fg); color: var(--fg); }
+
+/* Narrow desktop window (about 250px, e.g. a tiled column beside other work). Phones are wider and
+   never see this. Everything stays; it gets smaller and the countdown column goes. */
+@media (max-width: 300px) {
+  .top { padding: 10px 12px 0; }
+  .top h1 { font-size: 22px; white-space: nowrap; }
+  .top-right { gap: 6px; }
+  .top .lbl { font-size: 10px; letter-spacing: .08em; white-space: nowrap; }
+  .top .lbl .yr, .top .lbl .wk { display: none; }
+  .dots { gap: 3px; height: 30px; padding-left: 4px; }
+  .dots i { width: 4px; height: 4px; }
+
+  .strip { gap: 3px; padding: 8px; }
+  .strip button, .strip .month-cell { border-radius: 8px; }
+  .strip button .lbl { top: 3px; left: 4px; font-size: 7.5px; letter-spacing: 0; }
+  .strip b { right: 4px; bottom: 8px; font-size: 13px; }
+  .strip .load { right: 4px; bottom: 3px; height: 3px; }
+  .strip .load i { width: 3px; height: 3px; }
+  .strip .load i:nth-child(n+2) { display: none; }
+  .strip .month-cell .lbl { display: none; }
+  .strip .month-cell b { right: 4px; bottom: 9px; font-size: 9px; }
+  .strip .month-cell .grid-icon { right: 4px; bottom: 3px; width: 10px; height: 4px; background-size: 3.5px 4px; }
+
+  .gt { background-position: 66px 0; padding-bottom: 7rem; }
+  .gt-row, .gt-now { grid-template-columns: 44px 20px 1fr 12px; padding: 0 12px; }
+  .gt-row { min-height: 40px; font-size: 14px; }
+  .gt-row .n { display: none; }
+  .gt-row .t { padding-left: 8px; }
+  .gt-row .tm { font-size: 11.5px; }
+  .gt-row .tm.ad { font-size: 8px; letter-spacing: .02em; white-space: nowrap; }
+  .gt-row .t .tag { margin-left: 4px; font-size: 7.5px; padding: 0 3px; }
+  .gt-now hr { grid-column: 3 / 5; }
+  .gt-now .tm { font-size: 10.5px; }
+  .gt-band { padding: 0 12px; font-size: 9.5px; letter-spacing: .1em; }
+  .gt-detail { padding: 2px 12px 12px 76px; }
+  .gt-detail .row-actions { gap: 6px; }
+  .gt-empty { padding: 12px 12px 12px 76px; }
+  .pill { min-height: 30px; padding: 0 10px; font-size: 10px; letter-spacing: .06em; }
+  .ringing { margin: 6px 8px; padding: 10px 12px; }
+  .ringing .ring-title { font-size: 17px; }
+
+  .fx-wrap { padding: 24px 8px 10px; }
+  .fx { height: 44px; border-radius: 14px; }
+  .fx-k { width: 38px; font-size: 15px; }
+  .fx-in { padding: 0 10px; font-size: 14px; }
+  .fx-hint { gap: 8px; margin: 7px 2px 0; }
+  .fx-hint .lbl { font-size: 9px; letter-spacing: .08em; }
+
+  .panel { padding: 8px 12px 16px; border-radius: 20px 20px 0 0; }
+  .input { font-size: 18px; }
+  .keys { gap: 6px; margin: 10px 0 8px; }
+  .key { height: 54px; border-radius: 16px; gap: 7px; font-size: 9px; letter-spacing: .06em; }
+  .readout { padding: 10px 12px; border-radius: 16px; }
+  .dot.big { font-size: 32px; }
+  .dot.big.small { font-size: 22px; }
+  .readout { flex-direction: column; align-items: flex-start; gap: 6px; }
+  .readout .dot.big { white-space: nowrap; }
+  .readout .right { text-align: left; font-size: 9.5px; letter-spacing: .08em; }
+  .chips { gap: 4px; }
+  .chips .pill { padding: 0 8px; }
+  .tl .row2 > svg { width: 40px; height: auto; }
+  .tiles { grid-template-columns: 1fr; }
+  .tl.w { grid-column: auto; }
+  .tl { min-height: 0; padding: 11px 12px; border-radius: 16px; }
+  .pgrid { grid-template-columns: repeat(3, 1fr); }
+  .pgrid button { height: 36px; font-size: 10.5px; }
+  .days { gap: 3px; }
+  .dial { width: min(200px, 80vw); }
+  .dial .dot.big { font-size: 26px; }
+  .stepper { gap: 8px; }
+  .month-head h2 { font-size: 20px; }
+  .month-head .icon { font-size: 22px; padding: 4px 8px; }
+  .month-days, .month-grid { gap: 3px; }
+  .month-grid button { border-radius: 8px; }
+  .month-grid button .lbl { display: none; }
+  .month-grid b { right: 4px; bottom: 8px; font-size: 13px; }
+  .month-grid .load { right: 4px; bottom: 3px; }
+  .month-grid .load i { width: 3px; height: 3px; }
+}
