@@ -352,13 +352,47 @@ function dayCell(day: number, shownDay: number, now: number, month: number, lett
   return cell;
 }
 
-// The strip shows six days from today (or from wherever the timeline has moved to); its seventh
-// box always opens the month view.
-let stripStart = startOfDay(Date.now());
-function stripFor(day: number) {
-  if (day >= stripStart && day < addDays(stripStart, 6)) return stripStart;
-  const today = startOfDay(Date.now());
-  return day >= today && day < addDays(today, 6) ? today : day;
+// The strip shows six days with the shown day always second; its seventh box always opens the
+// month view. The days sit on a sliding track with spare days either side, so a change of day
+// slides there from wherever the track is (mid-drag or mid-slide) rather than repainting.
+const stripFor = (day: number) => addDays(day, -1);
+const SPARE = 7;
+const stripDays = el('div', 'strip-days');
+const stripClip = el('div', 'strip-clip');
+// Viewfinder (docs/design/strip-indicators.html, variant 02): corner brackets frame the second
+// box while the strip moves, so the day it will land on is clear before it settles.
+// Corner classes are prefixed: the sheet's tiles already use `.tl`.
+const finder = ['tl', 'tr', 'bl', 'br'].map(corner => el('i', `finder f-${corner}`));
+stripDays.append(stripClip, ...finder);
+let stripTrack = el('div', 'strip-track');
+let stripShown: number | null = null;
+let stripStep = 0;
+let stripDragged = false;
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const daysBetween = (a: number, b: number) => Math.round((b - a) / 86_400_000);
+const trackX = (track: HTMLElement) => new DOMMatrixReadOnly(getComputedStyle(track).transform).m41;
+// The brackets show while a finger drags the strip and until a slide finishes.
+let stripMoving = false;
+const showFinder = () => stripDays.classList.toggle('moving', stripMoving || stripDays.classList.contains('sliding'));
+function slideTrack(track: HTMLElement, from: number, to: number) {
+  track.style.transition = 'none';
+  track.style.transform = `translateX(${from}px)`;
+  if (Math.abs(from - to) < 0.5 || reduceMotion.matches) {
+    track.style.transform = `translateX(${to}px)`;
+    stripDays.classList.remove('sliding');
+    showFinder();
+    return;
+  }
+  void track.offsetWidth;
+  track.style.transition = '';
+  track.style.transform = `translateX(${to}px)`;
+  stripDays.classList.add('sliding');
+  showFinder();
+  track.addEventListener('transitionend', () => {
+    if (track !== stripTrack) return;
+    stripDays.classList.remove('sliding');
+    showFinder();
+  }, { once: true });
 }
 
 function renderHeader(shownDay: number, preview: boolean) {
@@ -373,16 +407,32 @@ function renderHeader(shownDay: number, preview: boolean) {
   }
   $('#open-settings').classList.toggle('red', !!sync.error);
   const strip = $<HTMLDivElement>('#strip');
-  strip.replaceChildren();
+  // Where the old track sits relative to its resting place, carried over to the new one.
+  const old = stripTrack;
+  const offset = stripShown !== null && stripStep ? trackX(old) + SPARE * stripStep : 0;
+  const delta = stripShown !== null ? daysBetween(stripShown, shownDay) : 0;
+  stripShown = shownDay;
+  if (strip.firstChild !== stripDays) strip.replaceChildren(stripDays);
+  else while (stripDays.nextSibling) stripDays.nextSibling.remove();
+  const gap = parseFloat(getComputedStyle(strip).columnGap) || 0;
+  const cell = (stripDays.clientWidth - 5 * gap) / 6;
+  stripStep = cell > 0 ? cell + gap : 0;
+  stripDays.style.setProperty('--cell', `${cell}px`);
+  stripDays.style.setProperty('--step', `${stripStep}px`);
+  stripTrack = el('div', 'strip-track');
   const now = Date.now();
-  const start = preview ? stripFor(shownDay) : (stripStart = stripFor(shownDay));
+  const start = addDays(stripFor(shownDay), -SPARE);
   const month = new Date(shownDay).getMonth();
-  for (let i = 0; i < 6; i++) {
+  for (let i = 0; i < 6 + 2 * SPARE; i++) {
     const day = addDays(start, i);
-    const cell = dayCell(day, shownDay, now, month, true);
-    cell.addEventListener('click', () => goToDay(day));
-    strip.append(cell);
+    const c = dayCell(day, shownDay, now, month, true);
+    c.addEventListener('click', () => { if (!stripDragged) goToDay(day); });
+    stripTrack.append(c);
   }
+  stripClip.replaceChildren(stripTrack);
+  const rest = -SPARE * stripStep;
+  const from = Math.abs(delta) <= SPARE ? rest + offset + delta * stripStep : rest;
+  slideTrack(stripTrack, Math.max(-2 * SPARE * stripStep, Math.min(0, from)), rest);
   const more = el('button', 'month-cell');
   more.type = 'button';
   more.setAttribute('aria-label', 'Month view');
@@ -796,16 +846,61 @@ gutter.addEventListener('touchend', event => {
   if (Math.abs(dx) > 60 && Math.abs(dx) > 2 * Math.abs(dy)) goToDay(addDays(selectedDay, dx < 0 ? 1 : -1));
 });
 
-// ── Strip navigation: swipe on touch, arrow keys on desktop ──
-let swipeX: number | null = null;
-$<HTMLDivElement>('#strip').addEventListener('touchstart', event => { swipeX = event.touches[0].clientX; }, { passive: true });
-$<HTMLDivElement>('#strip').addEventListener('touchend', event => {
-  if (swipeX === null) return;
-  const dx = event.changedTouches[0].clientX - swipeX;
-  swipeX = null;
-  // Six days at a time, matching the strip.
-  if (Math.abs(dx) > 50) { stripStart = addDays(stripStart, dx < 0 ? 6 : -6); goToDay(stripStart); }
+// ── Strip navigation: drag the days (touch or mouse) and they snap to the nearest day, carried
+// further by a flick; arrow keys on desktop ──
+let drag: { id: number; x: number; y: number; t: number; lastX: number; lastT: number; v: number; moving: boolean } | null = null;
+stripDays.addEventListener('pointerdown', event => {
+  if (lifted || (event.pointerType === 'mouse' && event.button !== 0)) return;
+  // A mouse press would otherwise start a text selection, which WebKitGTK can turn into a
+  // drag-and-drop that swallows the release and leaves the strip following the pointer.
+  if (event.pointerType === 'mouse') event.preventDefault();
+  drag = { id: event.pointerId, x: event.clientX, y: event.clientY, t: event.timeStamp, lastX: event.clientX, lastT: event.timeStamp, v: 0, moving: false };
+  stripDragged = false;
 });
+stripDays.addEventListener('dragstart', event => event.preventDefault());
+stripDays.addEventListener('pointermove', event => {
+  if (!drag || event.pointerId !== drag.id || lifted) return;
+  // The release was lost somewhere: end the drag where it is rather than keep following.
+  if (event.pointerType === 'mouse' && event.buttons === 0) { endDrag(event); return; }
+  const dx = event.clientX - drag.x;
+  if (!drag.moving) {
+    if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(event.clientY - drag.y)) return;
+    drag.moving = true;
+    stripDragged = true;
+    stripMoving = true;
+    showFinder();
+    try { stripDays.setPointerCapture(event.pointerId); } catch { /* the pointer has already gone */ }
+  }
+  const dt = event.timeStamp - drag.lastT;
+  if (dt > 0) drag.v = 0.8 * ((event.clientX - drag.lastX) / dt) + 0.2 * drag.v;
+  drag.lastX = event.clientX; drag.lastT = event.timeStamp;
+  const rest = -SPARE * stripStep;
+  stripTrack.style.transition = 'none';
+  stripTrack.style.transform = `translateX(${Math.max(rest - SPARE * stripStep, Math.min(rest + SPARE * stripStep, rest + dx))}px)`;
+});
+function endDrag(event: PointerEvent) {
+  if (!drag || event.pointerId !== drag.id) return;
+  const { moving, x, v, lastX, lastT } = drag;
+  drag = null;
+  if (!moving) return;
+  stripMoving = false;
+  // A flick carries on for a moment; a slow drag lands where it was let go.
+  // Measured from the last move, since a cancel or lost capture may not carry a position.
+  const still = event.type !== 'pointerup' || event.timeStamp - lastT > 80;
+  const travel = lastX - x + (still ? 0 : v * 180);
+  const shift = stripStep ? Math.max(-SPARE, Math.min(SPARE, Math.round(-travel / stripStep))) : 0;
+  if (shift) goToDay(addDays(selectedDay, shift));
+  else slideTrack(stripTrack, trackX(stripTrack), -SPARE * stripStep);
+  // The click that follows a drag should not pick the day under the finger.
+  setTimeout(() => { stripDragged = false; });
+}
+stripDays.addEventListener('pointerup', endDrag);
+stripDays.addEventListener('pointercancel', endDrag);
+// Only the strip's own capture counts: taking capture from the day button under a finger (touch
+// capture is implicit) fires the button's lostpointercapture, which bubbles here mid-drag.
+stripDays.addEventListener('lostpointercapture', event => { if (event.target === stripDays) endDrag(event); });
+addEventListener('blur', () => { if (drag) endDrag(new PointerEvent('pointercancel', { pointerId: drag.id })); });
+addEventListener('resize', () => { stripShown = null; renderHeader(selectedDay, false); });
 
 // ── The add sheet: one view (revised from the deck's B, 2026-10-29): the short sheet's top half, then
 // compact tiles that open in place (B1) with the B2 instruments inside. ──
@@ -821,7 +916,10 @@ const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const at = (day: number, minutes: number) => { const d = new Date(day); d.setHours(Math.floor(minutes / 60), minutes % 60, 0, 0); return d.getTime(); };
 const draftTime = () => (draft.kind !== 'marker' && draft.minutes !== null ? at(draft.day, draft.minutes) : null);
-function durationText(m: number) { return m < 60 ? [String(m), 'min'] : m % 60 ? [`${Math.floor(m / 60)}h${two(m % 60)}`, ''] : [String(m / 60), m === 60 ? 'hour' : 'hours']; }
+// A reminder without a time is all day on its day, which the core stores as a marker.
+const allDay = () => draft.kind === 'marker' || (draft.kind === 'reminder' && draft.minutes === null);
+const dayWarnings = (warnings: number[]) => warnings.filter(w => w === 0 || w % 1440 === 0);
+function durationText(m: number) { return m === 1440 ? ['All day', ''] : m < 60 ? [String(m), 'min'] : m % 60 ? [`${Math.floor(m / 60)}h${two(m % 60)}`, ''] : [String(m / 60), m === 60 ? 'hour' : 'hours']; }
 function spanText(m: number) { return m === 0 ? 'Day of' : m % 10080 === 0 ? `${m / 10080}W` : m % 1440 === 0 ? `${m / 1440}D` : m % 60 === 0 ? `${m / 60}H` : `${m}M`; }
 const WEEKDAYS = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 function repeatText(r: Repeat | null): [string, string] {
@@ -845,17 +943,19 @@ const sameRepeat = (a: Repeat | null, b: Repeat | null) => JSON.stringify(a) ===
 function draftTask(): Task {
   const existing = editing ? data.records[editing]?.task : null;
   const { kind: _k, date: _d, durationMinutes: _m, repeat: _r, timeZone: _z, warnings: _w, quiet: _q, snoozeMinutes: _s, ...rest } = existing ?? {} as Partial<Task>;
-  const marker = draft.kind === 'marker';
+  const marker = allDay();
   const timed = draftTime();
+  const warnings = marker ? dayWarnings(draft.warnings) : draft.warnings.filter(w => w !== 0);
+  const repeat = marker && draft.repeat?.type === 'fixed' ? null : draft.repeat;
   return {
     ...rest, schemaVersion: 1, title: titleInput.value, notes: draft.notes,
     completed: existing?.completed ?? false, remindAt: marker ? null : timed,
     ...(marker ? { kind: 'marker' as const, date: isoDate(draft.day) } : {}),
     ...(draft.kind === 'alarm' ? { kind: 'alarm' as const } : {}),
     ...(draft.duration ? { durationMinutes: draft.duration } : {}),
-    ...(draft.repeat ? { repeat: draft.repeat } : {}),
-    ...(draft.warnings.length ? { warnings: [...draft.warnings].sort((a, b) => b - a) } : {}),
-    ...(draft.repeat || draft.warnings.length ? { timeZone: existing?.timeZone ?? zone } : {}),
+    ...(repeat ? { repeat } : {}),
+    ...(warnings.length ? { warnings: [...warnings].sort((a, b) => b - a) } : {}),
+    ...(repeat || warnings.length ? { timeZone: existing?.timeZone ?? zone } : {}),
     // Markers have no notification to quieten or snooze.
     ...(!marker && draft.quiet ? { quiet: true } : {}),
     ...(!marker && draft.snooze && draft.snooze !== 10 ? { snoozeMinutes: draft.snooze } : {}),
@@ -866,7 +966,7 @@ let previewTimer = 0;
 function refreshPreview() {
   clearTimeout(previewTimer);
   preview = [];
-  if (!draft.repeat || (draft.kind !== 'marker' && draft.minutes === null) || !isTauri()) return;
+  if (!draft.repeat || (draft.kind === 'alarm' && draft.minutes === null) || (allDay() && draft.repeat.type === 'fixed') || !isTauri()) return;
   previewTimer = window.setTimeout(async () => {
     try { preview = await invoke<number[]>('preview_occurrences', { task: { ...draftTask(), title: titleInput.value || 'Preview', schemaVersion: 2 }, count: 3 }); }
     catch { preview = []; }
@@ -975,7 +1075,7 @@ function durationTrack() {
 
 // B2 instrument for Warn before: a dot timeline up to the start, warnings lit.
 function warnTimeline() {
-  const marker = draft.kind === 'marker';
+  const marker = allDay();
   const marks = marker ? [10080, 2880, 1440, 0] : [10080, 2880, 1440, 120, 60, 30, 15, 10, 5];
   const wrap = el('div');
   const track = el('div', 'track');
@@ -1032,14 +1132,14 @@ function tile(name: TileName) {
     for (const [label, on, action] of items) g.append(choice(label, on, action, ghost ? 'ghost' : ''));
     return g;
   };
-  const marker = draft.kind === 'marker';
+  const marker = allDay();
   if (name === 'duration') {
     const [n, unit] = draft.duration ? durationText(draft.duration) : ['—', ''];
-    t.append(el('span', 'lbl', 'Duration'), row2(big(n), el('span', 'unit', unit)));
+    t.append(el('span', 'lbl', 'Duration'), row2(big(n, n.length > 3 ? ' small' : ''), el('span', 'unit', unit)));
     if (open) {
       t.append(durationTrack(), presets([
         ['None', !draft.duration, () => { draft.duration = null; }],
-        ...[15, 30, 45, 60, 90, 120, 180].map(m => [durationText(m).join(' ').replace('1 hour', '1h').replace(' hours', 'h'), draft.duration === m, () => { draft.duration = m; }] as [string, boolean, () => void]),
+        ...[15, 30, 45, 60, 90, 120, 180, 1440].map(m => [durationText(m).join(' ').trim().replace('1 hour', '1h').replace(' hours', 'h'), draft.duration === m, () => { draft.duration = m; }] as [string, boolean, () => void]),
       ]));
     }
   } else if (name === 'repeat') {
@@ -1165,7 +1265,11 @@ function whenEditor() {
     ['12:00', draft.minutes === 720, () => { draft.minutes = 720; }],
     ['18:00', draft.minutes === 1080, () => { draft.minutes = 1080; }],
     ['+30m', false, () => { draft.minutes = (now + 30) % 1440; }],
-    ['No time', draft.minutes === null, () => { draft.minutes = null; draft.repeat = null; }],
+    ['No time', draft.minutes === null, () => {
+      draft.minutes = null;
+      if (draft.repeat?.type === 'fixed') draft.repeat = null;
+      draft.warnings = dayWarnings(draft.warnings);
+    }],
   ] as [string, boolean, () => void][]) presets.append(choice(label, on, action));
   const done = el('button', 'pill', 'Done');
   done.type = 'button';
@@ -1212,6 +1316,7 @@ $<HTMLInputElement>('#pick-date').addEventListener('change', event => {
 
 function renderSheet() {
   const marker = draft.kind === 'marker';
+  const untimed = allDay();
   $('#sheet-label').textContent = editing ? 'Edit entry' : 'New entry';
   $('#keys').replaceWith(Object.assign(keys(), { id: 'keys' }));
   const time = draftTime();
@@ -1219,11 +1324,11 @@ function renderSheet() {
   readout.classList.toggle('open', openTile === 'when');
   readout.disabled = marker;
   readout.setAttribute('aria-expanded', String(openTile === 'when'));
-  readout.replaceChildren(el('span', 'dot big', marker ? 'All day' : time !== null ? clock(time) : '--:--'),
+  readout.replaceChildren(el('span', 'dot big', untimed ? 'All day' : time !== null ? clock(time) : '--:--'),
     el('span', 'lbl right', `${longDay(draft.day)}${time !== null ? `\nin ${countdown(time, Date.now())}` : marker ? '' : '\ntap to set a time'}`));
   $('#when-edit').replaceChildren(...(openTile === 'when' && !marker ? [whenEditor()] : []));
   $('#day-chips').replaceWith(Object.assign(dayChips(), { id: 'day-chips' }));
-  $<HTMLDivElement>('#tiles').replaceChildren(...TILES.filter(n => !marker || (n !== 'sound' && n !== 'snooze')).map(tile));
+  $<HTMLDivElement>('#tiles').replaceChildren(...TILES.filter(n => !untimed || (n !== 'sound' && n !== 'snooze')).map(tile));
   // Editing a repeating task can change just this occurrence or the whole series.
   const series = !!(editing && data.records[editing]?.task?.repeat);
   $<HTMLButtonElement>('#save-one').hidden = !series;

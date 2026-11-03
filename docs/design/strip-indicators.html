@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NothingToDo — Strip snap indicators</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Doto:wght@500;700;900&family=Space+Grotesk:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+/* Tokens and deck chrome follow docs/design/ui-directions.html. */
+:root { --dot: 'Doto', 'Space Mono', monospace; --mono: 'Space Mono', ui-monospace, monospace; --sans: 'Space Grotesk', system-ui, sans-serif; --red: #d71921; }
+[data-theme=dark] { --deck: #050505; --deck-dot: #1c1c1c; --deck-fg: #f2f2f2; --deck-dim: #7a7a7a;
+  --bg: #000; --surface: #111; --surface2: #1a1a1a; --line: #2b2b2b; --fg: #fff; --dim: #8c8c8c; --faint: #4a4a4a; --edge: #2a2a2a; }
+[data-theme=light] { --deck: #e9e9e6; --deck-dot: #cfcfcb; --deck-fg: #111; --deck-dim: #6b6b6b;
+  --bg: #f4f4f2; --surface: #fff; --surface2: #ebebe8; --line: #d6d6d2; --fg: #000; --dim: #707070; --faint: #b4b4b0; --edge: #c9c9c5; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; background: var(--deck); color: var(--deck-fg); font-family: var(--sans); }
+body { background-image: radial-gradient(var(--deck-dot) 1px, transparent 1.3px); background-size: 14px 14px; }
+button { font: inherit; color: inherit; cursor: pointer; }
+
+.stage { position: fixed; left: 50%; top: 50%; width: 1600px; height: 900px; transform-origin: center; }
+.slide { position: absolute; inset: 0; padding: 72px 88px; display: flex; gap: 72px; opacity: 0; pointer-events: none; transition: opacity .35s ease, transform .35s ease; transform: translateY(12px); }
+.slide.on { opacity: 1; pointer-events: auto; transform: none; }
+.chrome { position: fixed; inset: auto 0 0 0; display: flex; justify-content: space-between; align-items: center; padding: 18px 28px; font: 11px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--deck-dim); z-index: 10; }
+.chrome button { letter-spacing: inherit; background: none; border: 1px solid var(--deck-dim); border-radius: 99px; padding: 6px 14px; text-transform: uppercase; font: 11px var(--mono); color: var(--deck-dim); }
+.chrome button:hover { color: var(--deck-fg); border-color: var(--deck-fg); }
+.pips { display: flex; gap: 8px; }
+.pips i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--deck-dim); cursor: pointer; }
+.pips i.on { background: var(--deck-fg); border-color: var(--deck-fg); }
+.count { font-family: var(--dot); font-weight: 700; font-size: 18px; letter-spacing: .05em; color: var(--deck-fg); }
+
+.copy { width: 560px; flex: none; display: flex; flex-direction: column; }
+.kicker { font: 12px var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--deck-dim); }
+.num { font-family: var(--dot); font-weight: 900; font-size: 112px; line-height: .9; margin: 18px 0 10px; letter-spacing: -.02em; }
+.copy h2 { font-family: var(--dot); font-weight: 700; font-size: 54px; line-height: 1; }
+.lede { font-size: 17.5px; line-height: 1.5; margin: 16px 0 22px; max-width: 500px; }
+.facts { border-top: 1px solid var(--deck-dim); }
+.facts div { display: grid; grid-template-columns: 128px 1fr; gap: 16px; padding: 10px 0; border-bottom: 1px dotted var(--deck-dim); font-size: 14.5px; line-height: 1.45; }
+.facts dt { font: 10.5px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--deck-dim); padding-top: 3px; }
+.phones { flex: 1; display: flex; gap: 44px; justify-content: center; align-items: center; }
+.cap { font: 10.5px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--deck-dim); text-align: center; margin-top: 14px; }
+
+/* Cover */
+.cover { flex-direction: column; justify-content: space-between; }
+.cover h1 { font-family: var(--dot); font-weight: 900; font-size: 150px; line-height: .86; }
+.cover h1 .red { color: var(--red); }
+.cover .sub { font-size: 22px; max-width: 820px; line-height: 1.45; margin-top: 30px; }
+.toc { display: grid; grid-template-columns: repeat(5, 1fr); border-top: 1px solid var(--deck-fg); }
+.toc div { padding: 18px 20px 0 0; border-right: 1px dotted var(--deck-dim); margin-right: 20px; }
+.toc div:last-child { border: 0; }
+.toc b { font-family: var(--dot); font-size: 40px; display: block; }
+.toc span { font: 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.toc p { font-size: 13.5px; color: var(--deck-dim); margin-top: 6px; line-height: 1.4; }
+
+/* Phone shell */
+.phone { width: 340px; height: 712px; border-radius: 46px; background: var(--bg); color: var(--fg); border: 1px solid var(--edge); outline: 6px solid var(--deck); box-shadow: 0 0 0 7px var(--edge); position: relative; overflow: hidden; }
+.sb { height: 38px; padding: 14px 26px 0; display: flex; justify-content: space-between; font: 500 12px var(--sans); }
+.sb .r { display: flex; gap: 5px; align-items: center; }
+.sb .r i { width: 5px; height: 5px; border-radius: 50%; background: var(--fg); }
+.home-ind { position: absolute; bottom: 8px; left: 50%; width: 110px; height: 4px; margin-left: -55px; border-radius: 4px; background: var(--fg); opacity: .8; }
+.lbl { font: 9.5px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+
+/* App header, as in src/styles.css */
+.top { display: flex; justify-content: space-between; align-items: center; padding: 12px 18px 0; }
+.top h3 { font: 900 26px/1 var(--dot); text-transform: uppercase; transition: color .15s; }
+.top h3.ghost { color: var(--dim); }
+.top-r { display: flex; gap: 12px; align-items: center; }
+.dots3 { display: flex; gap: 4px; } .dots3 i { width: 4.5px; height: 4.5px; border-radius: 50%; background: var(--fg); }
+
+/* The strip: six sliding days and the month box. Extra vertical room is for the indicators. */
+.strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; padding: 18px 12px 16px; border-bottom: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+.days { grid-column: span 6; position: relative; min-width: 0; touch-action: pan-y; user-select: none; }
+.clip { overflow: hidden; margin: -16px 0; padding: 16px 0; }
+.track { display: flex; gap: 5px; width: max-content; will-change: transform; }
+.track.settle { transition: transform 280ms cubic-bezier(.2, .8, .2, 1); }
+.track button, .mc { flex: none; width: var(--cell); aspect-ratio: 1; position: relative; border: 0; border-radius: 10px; background: none; padding: 0; color: var(--fg); transition: opacity .12s, box-shadow .12s; }
+.track button .l, .mc .l { position: absolute; top: 5px; left: 6px; font: 8px var(--mono); letter-spacing: .06em; color: var(--dim); }
+.track button b { position: absolute; right: 6px; bottom: 11px; font: 900 17px/1 var(--dot); }
+.track button .ld { position: absolute; right: 6px; bottom: 5px; display: flex; gap: 2.5px; }
+.track button .ld i { width: 3.5px; height: 3.5px; border-radius: 50%; background: currentColor; }
+.track button.on { background: var(--fg); color: var(--bg); }
+.track button.on .l { color: var(--bg); }
+.track button.today:not(.on) b { text-decoration: underline; text-decoration-color: var(--red); text-underline-offset: 3px; }
+.mc { width: auto; border: 1px dashed var(--line); }
+.mc b { position: absolute; right: 6px; bottom: 11px; font: 900 11px/1 var(--dot); text-transform: uppercase; }
+.ind { position: absolute; pointer-events: none; transition: opacity .18s, transform .18s; }
+
+/* Timeline under the strip */
+.band { height: 26px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; font: 9.5px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--dim); background: var(--surface); }
+.gt { position: relative; background-image: repeating-linear-gradient(to bottom, var(--faint) 0 1.5px, transparent 1.5px 4.5px); background-size: 1.5px 100%; background-position: 69px 0; background-repeat: no-repeat; }
+.row { display: grid; grid-template-columns: 46px 20px 1fr 40px; align-items: center; padding: 0 14px; min-height: 42px; font-size: 14px; }
+.row .tm { font: 11px var(--mono); color: var(--dim); }
+.row .nd { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--fg); background: var(--bg); justify-self: center; }
+.row .nd.mk { border-radius: 2px; }
+.row .n { font: 10px var(--mono); color: var(--dim); text-align: right; }
+.empty { padding: 14px 16px 14px 92px; }
+.bar { position: absolute; left: 14px; right: 14px; bottom: 26px; height: 44px; border-radius: 99px; border: 1px solid var(--line); background: var(--surface); display: flex; align-items: center; padding: 0 18px; font-size: 13px; color: var(--dim); }
+
+/* ── 01 Sight: two fixed dots, above and below the slot ── */
+.v1 .pin { left: calc(var(--step) + var(--cell) / 2 - 2.5px); width: 5px; height: 5px; border-radius: 50%; background: var(--faint); }
+.v1 .pin.t { top: -10px; } .v1 .pin.b { top: calc(var(--cell) + 5px); }
+.v1.active .pin { background: var(--fg); transform: scale(1.4); }
+.v1.active .track button.tgt:not(.on) { box-shadow: inset 0 0 0 1.5px var(--fg); }
+
+/* ── 02 Viewfinder: corner brackets frame the slot while moving ── */
+.v2 .cn { width: 9px; height: 9px; opacity: 0; border: 0 solid var(--fg); }
+.v2 .cn.ktl { left: calc(var(--step) - 4px); top: -4px; border-width: 1.5px 0 0 1.5px; border-top-left-radius: 4px; }
+.v2 .cn.ktr { left: calc(var(--step) + var(--cell) - 5px); top: -4px; border-width: 1.5px 1.5px 0 0; border-top-right-radius: 4px; }
+.v2 .cn.kbl { left: calc(var(--step) - 4px); top: calc(var(--cell) - 5px); border-width: 0 0 1.5px 1.5px; border-bottom-left-radius: 4px; }
+.v2 .cn.kbr { left: calc(var(--step) + var(--cell) - 5px); top: calc(var(--cell) - 5px); border-width: 0 1.5px 1.5px 0; border-bottom-right-radius: 4px; }
+.v2 .cn.ktl, .v2 .cn.ktr { transform: translateY(-4px); } .v2 .cn.kbl, .v2 .cn.kbr { transform: translateY(4px); }
+.v2.active .cn { opacity: 1; transform: none; }
+
+/* ── 03 Rail: dotted rails above and below, lit solid over the slot ── */
+.v3 .rail { left: 0; right: 0; height: 2px; opacity: .35; background: repeating-linear-gradient(to right, var(--faint) 0 2px, transparent 2px 5px); }
+.v3 .rail.t { top: -9px; } .v3 .rail.b { top: calc(var(--cell) + 7px); }
+.v3 .seg { left: var(--step); width: var(--cell); height: 2px; background: repeating-linear-gradient(to right, var(--dim) 0 2px, transparent 2px 5px); }
+.v3 .seg.t { top: -9px; } .v3 .seg.b { top: calc(var(--cell) + 7px); }
+.v3.active .rail { opacity: 1; }
+.v3.active .seg { background: repeating-linear-gradient(to right, var(--fg) 0 3px, transparent 3px 5px); height: 3px; }
+
+/* ── 04 Readout: the landing day spelled above the slot, a dot caret below; the header previews it ── */
+.v4 .read { left: var(--step); width: var(--cell); top: -16px; text-align: center; font: 700 8.5px/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--dim); opacity: 0; transform: translateY(3px); }
+.v4 .caret { left: calc(var(--step) + var(--cell) / 2 - 5px); top: calc(var(--cell) + 5px); width: 10px; height: 6px; opacity: .5; }
+.v4 .caret i { position: absolute; width: 3px; height: 3px; border-radius: 50%; background: var(--fg); }
+.v4 .caret i:nth-child(1) { left: 3.5px; top: 0; } .v4 .caret i:nth-child(2) { left: 0; top: 3.5px; } .v4 .caret i:nth-child(3) { left: 7px; top: 3.5px; }
+.v4.active .read { opacity: 1; transform: none; color: var(--fg); }
+.v4.active .caret { opacity: 1; }
+.v4.active .track button.tgt:not(.on) { box-shadow: inset 0 0 0 1.5px var(--dim); }
+
+/* ── 05 Tape: ticks travel with the days like a tape measure; a fixed notch and a focus fade ── */
+.v5 .track button::before, .v5 .track button::after { content: ''; position: absolute; left: 50%; width: 1.5px; margin-left: -.75px; height: 4px; background: var(--faint); border-radius: 1px; opacity: 0; transition: opacity .18s; }
+.v5 .track button::before { top: -9px; } .v5 .track button::after { bottom: -9px; }
+.v5.active .track button::before, .v5.active .track button::after { opacity: 1; }
+.v5 .notch { left: calc(var(--step) + var(--cell) / 2 - 1px); width: 2px; height: 8px; border-radius: 1px; background: var(--dim); }
+.v5 .notch.t { top: -13px; } .v5 .notch.b { top: calc(var(--cell) + 5px); }
+.v5.active .notch { background: var(--fg); height: 10px; }
+.v5.active .notch.t { top: -15px; }
+
+/* Compare slide: the five strips stacked, larger */
+.cmp { flex-direction: column; gap: 26px; }
+.cmp-grid { display: grid; grid-template-columns: 220px 560px 1fr; gap: 14px 36px; align-items: center; }
+.cmp-grid .nm { font: 700 34px/1 var(--dot); }
+.cmp-grid .nm small { display: block; font: 10.5px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--deck-dim); margin-top: 6px; }
+.cmp-grid .box { border-radius: 18px; overflow: hidden; border: 1px solid var(--edge); }
+.cmp-grid .box .strip { border: 0; }
+.cmp-grid p { font-size: 14.5px; line-height: 1.45; color: var(--deck-dim); }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+
+<section class="slide cover on">
+  <div>
+    <div class="kicker">NothingToDo · Strip · snap indicators · 1 Nov 2026</div>
+    <h1 style="margin-top:42px">Where it<br>lands<span class="red">.</span></h1>
+    <p class="sub">Five ways to mark the slot the strip snaps to, so you can see which day you'll get before you let go. The slot is the second box, where the selected day always sits. Every phone here works: drag the days, flick them, or tap one. Leave a phone alone and it demonstrates itself.</p>
+  </div>
+  <div class="toc">
+    <div><b>01</b><span>Sight</span><p>Two fixed dots, above and below the slot.</p></div>
+    <div><b>02</b><span>Viewfinder</span><p>Corner brackets frame the slot while moving.</p></div>
+    <div><b>03</b><span>Rail</span><p>Dotted rails, lit solid over the slot.</p></div>
+    <div><b>04</b><span>Readout</span><p>The landing day spelled out above the slot.</p></div>
+    <div><b>05</b><span>Tape</span><p>Ticks travel with the days past a fixed notch.</p></div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="copy">
+    <div class="kicker">Variant</div>
+    <div class="num">01</div>
+    <h2>Sight</h2>
+    <p class="lede">A dot above and a dot below the second box, like the sights on a dial. At rest they're faint marks; while you drag they turn solid and the day under them gets an outline.</p>
+    <dl class="facts">
+      <div><dt>At rest</dt><dd>Two faint dots. Quiet but always there, so the slot is learnable.</dd></div>
+      <div><dt>Moving</dt><dd>Dots go solid and grow; the landing day is outlined.</dd></div>
+      <div><dt>Language</dt><dd>Pure dot. The smallest addition of the five.</dd></div>
+      <div><dt>Risk</dt><dd>Easy to miss on a bright screen at rest.</dd></div>
+    </dl>
+  </div>
+  <div class="phones"><div><div class="phone v1" data-strip></div><p class="cap">Drag the days · flick · tap</p></div></div>
+</section>
+
+<section class="slide">
+  <div class="copy">
+    <div class="kicker">Variant</div>
+    <div class="num">02</div>
+    <h2>Viewfinder</h2>
+    <p class="lede">Four corner brackets frame the slot, like a camera's focus box. They only appear while the strip moves, sliding in from above and below, and fade once it settles.</p>
+    <dl class="facts">
+      <div><dt>At rest</dt><dd>Nothing. The strip looks exactly as it does today.</dd></div>
+      <div><dt>Moving</dt><dd>Brackets close in around the slot; the days pass through them.</dd></div>
+      <div><dt>Language</dt><dd>Line, not dot. Reads clearly whatever the day looks like.</dd></div>
+      <div><dt>Risk</dt><dd>Brackets touch the neighbouring boxes on the narrow desktop layout.</dd></div>
+    </dl>
+  </div>
+  <div class="phones"><div><div class="phone v2" data-strip></div><p class="cap">Drag the days · flick · tap</p></div></div>
+</section>
+
+<section class="slide">
+  <div class="copy">
+    <div class="kicker">Variant</div>
+    <div class="num">03</div>
+    <h2>Rail</h2>
+    <p class="lede">A dotted rail runs above and below the strip, the same dots as the timeline's gutter rail. The segment over the slot is darker, and while moving the whole rail brightens and that segment turns solid.</p>
+    <dl class="facts">
+      <div><dt>At rest</dt><dd>A faint rail with the slot's segment picked out.</dd></div>
+      <div><dt>Moving</dt><dd>Rail brightens; the slot segment thickens to solid dots.</dd></div>
+      <div><dt>Language</dt><dd>Echoes the gutter rail, so the strip and timeline feel related.</dd></div>
+      <div><dt>Risk</dt><dd>The full-width rail adds some visual noise at rest.</dd></div>
+    </dl>
+  </div>
+  <div class="phones"><div><div class="phone v3" data-strip></div><p class="cap">Drag the days · flick · tap</p></div></div>
+</section>
+
+<section class="slide">
+  <div class="copy">
+    <div class="kicker">Variant</div>
+    <div class="num">04</div>
+    <h2>Readout</h2>
+    <p class="lede">While moving, the weekday you'd land on is spelled out above the slot and a dot caret points up from below. The big date in the header previews it too, dimmed until you let go.</p>
+    <dl class="facts">
+      <div><dt>At rest</dt><dd>Only the caret, half strength.</dd></div>
+      <div><dt>Moving</dt><dd>Weekday label above, caret solid, header previews the day.</dd></div>
+      <div><dt>Language</dt><dd>Mono label and dot caret; the header preview matches how typing a day previews it.</dd></div>
+      <div><dt>Risk</dt><dd>The most text; needs the most room above the strip.</dd></div>
+    </dl>
+  </div>
+  <div class="phones"><div><div class="phone v4" data-strip></div><p class="cap">Drag the days · flick · tap</p></div></div>
+</section>
+
+<section class="slide">
+  <div class="copy">
+    <div class="kicker">Variant</div>
+    <div class="num">05</div>
+    <h2>Tape</h2>
+    <p class="lede">Each day carries a small tick above and below, so the ticks travel with the days like a tape measure past a fixed notch. You see the motion and the target together.</p>
+    <dl class="facts">
+      <div><dt>At rest</dt><dd>Just the two notches.</dd></div>
+      <div><dt>Moving</dt><dd>Ticks appear on every day and slide past the notch; the notch lengthens.</dd></div>
+      <div><dt>Language</dt><dd>Instrument-like, close to the duration and warning tracks in the sheet.</dd></div>
+      <div><dt>Risk</dt><dd>Ticks and notch can look alike mid-flick.</dd></div>
+    </dl>
+  </div>
+  <div class="phones"><div><div class="phone v5" data-strip></div><p class="cap">Drag the days · flick · tap</p></div></div>
+</section>
+
+<section class="slide cmp">
+  <div><div class="kicker">Side by side · all five run together</div></div>
+  <div class="cmp-grid">
+    <div class="nm">01<small>Sight</small></div><div class="box v1" data-strip="bare"></div><p>Smallest change; dots at rest teach where the slot is.</p>
+    <div class="nm">02<small>Viewfinder</small></div><div class="box v2" data-strip="bare"></div><p>Invisible at rest; clearest frame while moving.</p>
+    <div class="nm">03<small>Rail</small></div><div class="box v3" data-strip="bare"></div><p>Ties the strip to the timeline's rail.</p>
+    <div class="nm">04<small>Readout</small></div><div class="box v4" data-strip="bare"></div><p>Says the day in words; header previews it on the phones.</p>
+    <div class="nm">05<small>Tape</small></div><div class="box v5" data-strip="bare"></div><p>Shows motion as well as the target.</p>
+  </div>
+</section>
+
+</div>
+<div class="chrome">
+  <span class="count" id="count">01 / 07</span>
+  <div class="pips" id="pips"></div>
+  <span><button id="theme">T · Light / dark</button> &nbsp;← → to move</span>
+</div>
+
+<script>
+if (matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.dataset.theme = 'light';
+const DAY = 86400000;
+const startOfDay = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+const addDays = (t, n) => { const d = new Date(t); d.setDate(d.getDate() + n); return d.getTime(); };
+const two = n => String(n).padStart(2, '0');
+const wd = t => new Date(t).toLocaleDateString('en-GB', { weekday: 'short' });
+const today = startOfDay(Date.now());
+const SPARE = 7;
+let scale = 1;
+
+// A made-up week: loads and rows per day, the same on every phone.
+const sample = [['09:00', 'Standup'], ['12:30', 'Pick up parcel'], ['16:00', 'Dentist'], ['18:30', 'Gym'], ['', 'Bin day'], ['10:00', 'Call bank'], ['20:00', 'Water plants']];
+const hash = t => Math.abs(Math.round(t / DAY) * 2654435761 % 97);
+const dayRows = t => { const h = hash(t), n = 1 + h % 3; return Array.from({ length: n }, (_, i) => sample[(h + i * 3) % sample.length]).sort((a, b) => (a[0] || '00') .localeCompare(b[0] || '00')); };
+
+function makeStrip(host) {
+  const bare = host.dataset.strip === 'bare';
+  const v = [...host.classList].find(c => /^v\d$/.test(c));
+  const inds = {
+    v1: '<i class="ind pin t"></i><i class="ind pin b"></i>',
+    v2: '<i class="ind cn ktl"></i><i class="ind cn ktr"></i><i class="ind cn kbl"></i><i class="ind cn kbr"></i>',
+    v3: '<i class="ind rail t"></i><i class="ind rail b"></i><i class="ind seg t"></i><i class="ind seg b"></i>',
+    v4: '<span class="ind read"></span><i class="ind caret"><i></i><i></i><i></i></i>',
+    v5: '<i class="ind notch t"></i><i class="ind notch b"></i>',
+  }[v];
+  const stripHtml = `<div class="strip"><div class="days"><div class="clip"><div class="track"></div></div>${inds}</div><div class="mc"><span class="l">Month</span><b></b></div></div>`;
+  host.innerHTML = bare ? stripHtml : `<div class="sb"><span>21:40</span><span class="r"><i></i><i></i><i></i></span></div>
+    <div class="top"><h3></h3><div class="top-r"><span class="lbl wk"></span><span class="dots3"><i></i><i></i><i></i></span></div></div>
+    ${stripHtml}<div class="band"><span class="bl"></span><span class="bn"></span></div><div class="gt"></div>
+    <div class="bar"></div><div class="home-ind"></div>`;
+  const days = host.querySelector('.days'), track = host.querySelector('.track');
+  const s = { sel: today, step: 0, cell: 0, x: 0, active: false, last: 0 };
+  const rest = () => -SPARE * s.step;
+  const shiftAt = x => Math.max(-SPARE, Math.min(SPARE, Math.round(-(x - rest()) / (s.step || 1))));
+
+  function build() {
+    const start = addDays(s.sel, -1 - SPARE);
+    track.innerHTML = '';
+    for (let i = 0; i < 6 + 2 * SPARE; i++) {
+      const day = addDays(start, i), n = 1 + hash(day) % 3;
+      const b = document.createElement('button');
+      b.className = (day === s.sel ? 'on ' : '') + (day === today ? 'today' : '');
+      b.innerHTML = `<span class="l">${wd(day).slice(0, 1)}</span><b>${two(new Date(day).getDate())}</b><span class="ld">${'<i></i>'.repeat(n)}</span>`;
+      b.addEventListener('click', () => { if (!dragged) { s.last = performance.now(); go(i - SPARE - 1); } });
+      track.append(b);
+    }
+    host.querySelector('.mc b').textContent = new Date(s.sel).toLocaleDateString('en-GB', { month: 'short' });
+    if (!bare) {
+      header(s.sel, false);
+      host.querySelector('.wk').textContent = `${new Date(s.sel).toLocaleDateString('en-GB', { month: 'short' })} · ${Math.ceil(new Date(s.sel).getDate() / 7) + 43}`;
+      host.querySelector('.bl').textContent = s.sel === today ? 'Today' : `${wd(s.sel)} ${new Date(s.sel).getDate()} ${new Date(s.sel).toLocaleDateString('en-GB', { month: 'short' })}`;
+      const rows = dayRows(s.sel);
+      host.querySelector('.bn').textContent = rows.length;
+      host.querySelector('.gt').innerHTML = rows.length ? rows.map(([t, n]) => `<div class="row"><span class="tm">${t || 'all day'}</span><span class="nd${t ? '' : ' mk'}"></span><span>${n}</span><span class="n"></span></div>`).join('') : '<p class="empty lbl">Nothing planned</p>';
+      host.querySelector('.bar').textContent = `New task for ${wd(s.sel)} ${new Date(s.sel).getDate()}`;
+    }
+  }
+  function header(day, ghost) {
+    if (bare) return;
+    const h = host.querySelector('h3');
+    h.textContent = `${wd(day)} ${new Date(day).getDate()}`;
+    h.classList.toggle('ghost', ghost);
+  }
+  function layout() {
+    const w = days.clientWidth;
+    if (!w) return;
+    s.cell = (w - 25) / 6; s.step = s.cell + 5;
+    days.style.setProperty('--cell', `${s.cell}px`);
+    days.style.setProperty('--step', `${s.step}px`);
+    set(rest(), false);
+  }
+  // Moves the track and points the indicators at the day that would be picked.
+  function set(x, animate) {
+    s.x = x;
+    track.classList.toggle('settle', animate);
+    track.style.transform = `translateX(${x}px)`;
+    mark(shiftAt(x));
+  }
+  function mark(shift) {
+    const i = SPARE + 1 + shift;
+    [...track.children].forEach((b, j) => {
+      b.classList.toggle('tgt', s.active && j === i);
+      if (v === 'v5') b.style.opacity = s.active ? String(Math.max(.25, 1 - Math.abs(j - i) * .22)) : '';
+    });
+    const target = addDays(s.sel, shift);
+    const read = host.querySelector('.read');
+    if (read) read.textContent = `${wd(target)} ${new Date(target).getDate()}`;
+    if (v === 'v4') header(s.active ? target : s.sel, s.active && shift !== 0);
+  }
+  function activate(on) { s.active = on; host.classList.toggle('active', on); mark(shiftAt(s.x)); }
+  let settleTimer = 0;
+  function go(shift) {
+    activate(true);
+    clearTimeout(settleTimer);
+    set(rest() - shift * s.step, true);
+    mark(shift);
+    settleTimer = setTimeout(() => {
+      s.sel = addDays(s.sel, shift);
+      build();
+      set(rest(), false);
+      setTimeout(() => activate(false), 160);
+    }, 290);
+  }
+
+  // Dragging, in stage pixels (the deck is scaled to fit the window).
+  let drag = null, dragged = false;
+  days.addEventListener('pointerdown', e => {
+    clearTimeout(settleTimer);
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, from: s.x, lastX: e.clientX, lastT: e.timeStamp, v: 0, moving: false };
+    dragged = false; s.last = performance.now();
+  });
+  days.addEventListener('pointermove', e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = (e.clientX - drag.x) / scale;
+    if (!drag.moving) {
+      if (Math.abs(dx) < 6 || Math.abs(dx) < Math.abs(e.clientY - drag.y) / scale) return;
+      drag.moving = dragged = true; days.setPointerCapture(e.pointerId); activate(true);
+    }
+    const dt = e.timeStamp - drag.lastT;
+    if (dt > 0) drag.v = .8 * ((e.clientX - drag.lastX) / scale / dt) + .2 * drag.v;
+    drag.lastX = e.clientX; drag.lastT = e.timeStamp; s.last = performance.now();
+    set(Math.max(rest() - SPARE * s.step, Math.min(rest() + SPARE * s.step, drag.from + dx)), false);
+  });
+  const end = e => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const d = drag; drag = null;
+    if (!d.moving) return;
+    const still = e.timeStamp - d.lastT > 80;
+    release(s.x + (still ? 0 : d.v * 180));
+    setTimeout(() => { dragged = false; });
+  };
+  function release(x) { go(shiftAt(x)); }
+  days.addEventListener('pointerup', end);
+  days.addEventListener('pointercancel', end);
+
+  // Left alone, the strip demonstrates itself: a slow drag, a pause, a flick back.
+  let demoStep = 0;
+  async function tween(to, ms) {
+    const from = s.x, t0 = performance.now();
+    activate(true);
+    return new Promise(done => {
+      const f = now => {
+        const k = Math.min(1, (now - t0) / ms), e = k < .5 ? 2 * k * k : 1 - (-2 * k + 2) ** 2 / 2;
+        set(from + (to - from) * e, false);
+        k < 1 ? requestAnimationFrame(f) : done();
+      };
+      requestAnimationFrame(f);
+    });
+  }
+  async function demo() {
+    if (drag || !host.closest('.slide.on') || performance.now() - s.last < 3500 || !s.step) return;
+    const moves = [-2.35, 1.6, -0.62, 3.4, -1.45];
+    const m = moves[demoStep++ % moves.length];
+    await tween(rest() + m * s.step, 950);
+    await new Promise(r => setTimeout(r, 420));
+    if (performance.now() - s.last < 3500) return;
+    release(s.x);
+  }
+  build();
+  return { layout, demo };
+}
+
+const strips = [...document.querySelectorAll('[data-strip]')].map(makeStrip);
+setInterval(() => strips.forEach(s => s.demo()), 2600);
+
+// Deck navigation, as in ui-directions.html.
+const slides = [...document.querySelectorAll('.slide')];
+const pips = document.getElementById('pips');
+let at = 0;
+slides.forEach((_, i) => { const p = document.createElement('i'); p.onclick = () => show(i); pips.append(p); });
+function show(i) {
+  at = Math.max(0, Math.min(slides.length - 1, i));
+  slides.forEach((s, j) => s.classList.toggle('on', j === at));
+  [...pips.children].forEach((p, j) => p.classList.toggle('on', j === at));
+  document.getElementById('count').textContent = `${two(at + 1)} / ${two(slides.length)}`;
+}
+function fit() {
+  scale = Math.min(innerWidth / 1600, (innerHeight - 40) / 900);
+  document.getElementById('stage').style.transform = `translate(-50%, -50%) scale(${scale})`;
+}
+const theme = () => { const r = document.documentElement; r.dataset.theme = r.dataset.theme === 'dark' ? 'light' : 'dark'; };
+document.getElementById('theme').onclick = theme;
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') show(at + 1);
+  if (e.key === 'ArrowLeft') show(at - 1);
+  if (e.key.toLowerCase() === 't') theme();
+});
+addEventListener('resize', fit);
+fit(); show(0);
+document.fonts.ready.then(() => strips.forEach(s => s.layout()));
+strips.forEach(s => s.layout());
+</script>
+</body>
+</html>
