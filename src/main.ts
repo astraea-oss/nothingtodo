@@ -579,18 +579,17 @@ function render() {
     for (const [id, r] of attention) row(id, r, now, true);
   }
   const rest = entries.filter(e => !attention.includes(e) && e[1].task);
-  if (Math.min(listStart, shownDay) >= today) {
-    const overdue = rest.filter(([, r]) => !r.task!.completed && reminderAt(r) !== null && reminderAt(r)! < today);
-    if (overdue.length) {
-      const first = startOfDay(reminderAt(overdue[0][1])!);
-      const same = overdue.every(([, r]) => startOfDay(reminderAt(r)!) === first);
-      band(same ? `Overdue · ${shortDay(first)}` : 'Overdue', String(overdue.length), 'red');
-      for (const [id, r] of overdue) row(id, r, now, !same);
-    }
-  }
   // One continuous timeline from the first day shown: a band per day for the next two weeks,
   // then a band per month. Days with nothing show only when picked in the strip, or today.
   const first = Math.min(listStart, shownDay);
+  // Open tasks from before the timeline starts collect in one Overdue band, wherever it starts.
+  const overdue = rest.filter(([, r]) => !r.task!.completed && reminderAt(r) !== null && reminderAt(r)! < first);
+  if (overdue.length) {
+    const firstDue = startOfDay(reminderAt(overdue[0][1])!);
+    const same = overdue.every(([, r]) => startOfDay(reminderAt(r)!) === firstDue);
+    band(same ? `Overdue · ${shortDay(firstDue)}` : 'Overdue', String(overdue.length), 'red');
+    for (const [id, r] of overdue) row(id, r, now, !same);
+  }
   const typing = !!parsed.title;
   const newDay = typing ? (target !== null ? startOfDay(target) : shownDay) : null;
   const dayOf = (r: TaskRecord) => markerDay(r) ?? (reminderAt(r) !== null ? startOfDay(reminderAt(r)!) : null);
