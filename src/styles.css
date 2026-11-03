@@ -50,6 +50,24 @@ main { max-width: 40rem; margin: auto; height: 100vh; height: 100dvh; display: f
 .strip .load i.r, .month-grid .load i.r { background: var(--red); }
 .strip button.on, .month-grid button.on { background: var(--fg); color: var(--bg); }
 .strip button.on .lbl, .month-grid button.on .lbl { color: var(--bg); }
+/* The strip's six days slide on a track with spare days either side (see renderHeader). */
+.strip-days { grid-column: span 6; min-width: 0; gap: inherit; position: relative; touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.strip-clip { overflow: hidden; gap: inherit; }
+.strip-track { display: flex; gap: inherit; width: max-content; transition: transform 280ms cubic-bezier(.2, .8, .2, 1); will-change: transform; }
+.strip-track button { flex: none; width: var(--cell); }
+/* Viewfinder: corner brackets around the second box while the strip moves. They fade in by colour
+   and slide by position, not opacity or transform: WebKitGTK gives those their own GPU layer, which
+   can paint as a black box. */
+.strip .finder { --o: 4px; --s: 9px; --in: 4px; position: absolute; width: var(--s); height: var(--s); border: 0 solid transparent; pointer-events: none; transition: border-color .18s, top .18s; }
+.strip .finder.f-tl, .strip .finder.f-tr { top: calc(0px - var(--o) - var(--in)); }
+.strip .finder.f-bl, .strip .finder.f-br { top: calc(var(--cell) + var(--o) - var(--s) + var(--in)); }
+.strip .finder.f-tl, .strip .finder.f-bl { left: calc(var(--step) - var(--o)); }
+.strip .finder.f-tr, .strip .finder.f-br { left: calc(var(--step) + var(--cell) + var(--o) - var(--s)); }
+.strip .finder.f-tl { border-width: 1.5px 0 0 1.5px; border-top-left-radius: 4px; }
+.strip .finder.f-tr { border-width: 1.5px 1.5px 0 0; border-top-right-radius: 4px; }
+.strip .finder.f-bl { border-width: 0 0 1.5px 1.5px; border-bottom-left-radius: 4px; }
+.strip .finder.f-br { border-width: 0 1.5px 1.5px 0; border-bottom-right-radius: 4px; }
+.strip-days.moving .finder { --in: 0px; border-color: var(--fg); }
 
 /* Gutter list: bands, rows on a dotted rail, the NOW line */
 .gt { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: calc(8.5rem + env(safe-area-inset-bottom));
@@ -238,6 +256,8 @@ body.dragging { user-select: none; -webkit-user-select: none; }
   .strip .load i:nth-child(n+2) { display: none; }
   .strip .month-cell .lbl { display: none; }
   .strip .month-cell b { right: 4px; bottom: 9px; font-size: 9px; }
+  /* The narrow strip has 3px gaps: tighter brackets so they don't touch the neighbours. */
+  .strip .finder { --o: 2px; --s: 6px; border-radius: 0 !important; }
   .strip .month-cell .grid-icon { right: 4px; bottom: 3px; width: 10px; height: 4px; background-size: 3.5px 4px; }
 
   .gt { background-position: 66px 0; padding-bottom: 7rem; }
