@@ -5,6 +5,8 @@ use tokio::sync::{Mutex, mpsc};
 
 #[cfg(target_os = "android")]
 mod android;
+#[cfg(target_os = "android")]
+mod background;
 mod backup;
 mod credentials;
 mod paths;
@@ -14,7 +16,9 @@ mod window;
 use sync_worker::{SyncStatus, Trigger, update};
 
 struct AppState {
-    store: Mutex<Store>,
+    /// Shared with Android's background sync, which may run in the same process (see
+    /// `shared_store`).
+    store: Arc<Mutex<Store>>,
     sync: Mutex<Option<Arc<SyncClient>>>,
     sync_status: Mutex<SyncStatus>,
     sync_trigger: mpsc::Sender<Trigger>,
@@ -96,15 +100,41 @@ async fn install(app: &AppHandle, client: Option<SyncClient>) {
     *sync = client.map(Arc::new);
 }
 
+/// One open profile per process. Android's background sync can run in the app's process before
+/// or while the app starts, and two `Store`s on one file would refuse each other's commits.
+fn shared_store(path: std::path::PathBuf) -> Result<Arc<Mutex<Store>>, String> {
+    static OPEN: std::sync::Mutex<Option<(std::path::PathBuf, Arc<Mutex<Store>>)>> =
+        std::sync::Mutex::new(None);
+    let mut open = OPEN
+        .lock()
+        .map_err(|_| "Profile lock poisoned.".to_string())?;
+    if let Some((opened, store)) = open.as_ref() {
+        return if *opened == path {
+            Ok(store.clone())
+        } else {
+            Err(format!(
+                "Another profile is already open: {}",
+                opened.display()
+            ))
+        };
+    }
+    let store = Arc::new(Mutex::new(Store::open(&path)?));
+    *open = Some((path, store.clone()));
+    Ok(store)
+}
+
 /// Debug builds keep their own keyring entry, so a development run never picks up the sync login
 /// saved by an installed release build and syncs a real account into development data.
-fn keyring_service(app: &AppHandle) -> String {
-    let identifier = app.config().identifier.clone();
+fn keyring_service_for(identifier: &str) -> String {
     if cfg!(debug_assertions) {
         format!("{identifier}.debug")
     } else {
-        identifier
+        identifier.to_string()
     }
+}
+
+fn keyring_service(app: &AppHandle) -> String {
+    keyring_service_for(&app.config().identifier)
 }
 
 #[tauri::command]
@@ -254,11 +284,11 @@ pub fn run() {
             #[cfg(target_os = "android")]
             android::init_tls().map_err(std::io::Error::other)?;
             let paths = paths::AppPaths::resolve(app.handle()).map_err(std::io::Error::other)?;
-            let store = Store::open(paths.database()).map_err(std::io::Error::other)?;
+            let store = shared_store(paths.database()).map_err(std::io::Error::other)?;
             let (sync_trigger, receiver) = mpsc::channel(16);
             let (reminder_trigger, reminder_requests) = mpsc::channel(1);
             app.manage(AppState {
-                store: Mutex::new(store),
+                store,
                 sync: Mutex::new(None),
                 sync_status: Mutex::new(SyncStatus::default()),
                 sync_trigger,
@@ -269,6 +299,8 @@ pub fn run() {
             tauri::async_runtime::spawn(reminders::run(app.handle().clone(), reminder_requests));
             reminders::request(app.handle());
             tauri::async_runtime::spawn(restore_session(app.handle().clone()));
+            #[cfg(target_os = "android")]
+            background::app_started(app.handle());
             #[cfg(desktop)]
             let tray = window::create_tray(app.handle());
             #[cfg(desktop)]

@@ -12,7 +12,13 @@ import androidx.core.view.WindowInsetsCompat
 class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
-    super.onCreate(savedInstanceState)
+    // Creating the activity publishes its Android context to the Rust side, which background sync
+    // must not be doing at the same moment (see BackgroundSync.lock).
+    synchronized(BackgroundSync.lock) {
+      BackgroundSync.appStarted = true
+      super.onCreate(savedInstanceState)
+    }
+    SyncJob.schedule(applicationContext)
     // Android WebView reports zero CSS safe-area insets, so keep the page clear of the status
     // bar, navigation bar, display cutout and keyboard here instead.
     val content = findViewById<View>(android.R.id.content)
