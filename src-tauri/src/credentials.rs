@@ -86,6 +86,12 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| "Credential storage stopped unexpectedly.".to_string())?
 }
 
+/// Blocking form, for Android's background sync, which runs on its own thread.
+#[cfg(target_os = "android")]
+pub fn load_now(service: &str) -> Result<Option<Saved>, String> {
+    platform::load(service)
+}
+
 pub async fn load(service: String) -> Result<Option<Saved>, String> {
     blocking(move || platform::load(&service)).await
 }

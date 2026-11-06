@@ -83,7 +83,9 @@ object Reminders {
     // A snooze pressed since Rust last read the action log is not in its list yet; keep it.
     val listed = reminders.map { it.id }.toSet()
     val snoozed = pendingSnoozes(context).filter { it.id !in listed }
-    val all = reminders + snoozed
+    // Likewise a Complete pressed meanwhile: it stays off until the store has applied it.
+    val completed = pendingCompletes(context)
+    val all = reminders.filter { (it.taskId to it.remindAt) !in completed } + snoozed
     val keep = all.map { it.id }.toSet()
     loadSchedule(context).filter { it.id !in keep }.forEach { cancel(context, it.id) }
     // Save before arming, so a reboot part-way through still restores everything.
@@ -245,6 +247,14 @@ object Reminders {
       }
   }
 
+  private fun pendingCompletes(context: Context): Set<Pair<String, Long>> {
+    val actions = loadActions(context)
+    return (0 until actions.length()).map { actions.getJSONObject(it) }
+      .filter { it.optString("action") == "complete" }
+      .map { it.getString("taskId") to it.getLong("remindAt") }
+      .toSet()
+  }
+
   private fun write(context: Context, name: String, text: String) {
     val target = File(context.filesDir, name)
     val temporary = File(target.path + ".new")
@@ -291,7 +301,11 @@ class ReminderActionReceiver : BroadcastReceiver() {
 
 /** Alarms are cleared by a reboot, an app update and a change to exact-alarm access. */
 class ReminderRestoreReceiver : BroadcastReceiver() {
-  override fun onReceive(context: Context, intent: Intent) = Reminders.rearm(context)
+  override fun onReceive(context: Context, intent: Intent) {
+    Reminders.rearm(context)
+    // An update installed over an older version has no background sync scheduled yet.
+    SyncJob.schedule(context)
+  }
 }
 
 @InvokeArg

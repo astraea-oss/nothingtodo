@@ -216,6 +216,14 @@ impl Store {
         };
         match *action {
             NotificationAction::Complete => {
+                // A repeating task only moves on for the occurrence that went off. Another device
+                // may already have completed it, and ticking again would skip the next one too.
+                let pressed_for_current = task.remind_at == Some(remind_at)
+                    || record.reminder_at() == Some(remind_at)
+                    || task.warn_base().ok().flatten() == Some(remind_at);
+                if task.repeat.is_some() && !pressed_for_current {
+                    return Ok(false);
+                }
                 let mut done = task.clone();
                 done.completed = true;
                 self.save_task(Some(task_id.into()), done)?;
@@ -359,6 +367,55 @@ mod tests {
                 .apply_notification_action("missing", 1, &NotificationAction::Complete, 6000)
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn completing_an_occurrence_twice_moves_a_repeating_alarm_on_once() {
+        let mut store = Store::open(":memory:").unwrap();
+        let day = 86_400_000;
+        let mut wakeup = task("Wakeup", Some(day));
+        wakeup.kind = Some(crate::entries::Kind::Alarm);
+        wakeup.time_zone = Some("UTC".into());
+        wakeup.repeat = Some(crate::entries::Repeat::Calendar {
+            unit: crate::entries::Unit::Day,
+            every: 1,
+            weekdays: vec![],
+        });
+        let id = store.save_task(None, wakeup).unwrap();
+        let remind_at = |store: &Store| {
+            store.snapshot().records[&id]
+                .task
+                .clone()
+                .unwrap()
+                .remind_at
+        };
+        // Stopped on one device: the series moves to the next day.
+        assert!(
+            store
+                .apply_notification_action(&id, day, &NotificationAction::Complete, day + 1)
+                .unwrap()
+        );
+        assert_eq!(remind_at(&store), Some(2 * day));
+        // The other device stops the same ringing after syncing: nothing more happens.
+        assert!(
+            !store
+                .apply_notification_action(&id, day, &NotificationAction::Complete, day + 2)
+                .unwrap()
+        );
+        assert_eq!(remind_at(&store), Some(2 * day));
+        // A snoozed occurrence is still the current one.
+        store.snooze(&id, 2 * day, 2 * day + 600_000).unwrap();
+        assert!(
+            store
+                .apply_notification_action(
+                    &id,
+                    2 * day + 600_000,
+                    &NotificationAction::Complete,
+                    2 * day + 600_001,
+                )
+                .unwrap()
+        );
+        assert_eq!(remind_at(&store), Some(3 * day));
     }
 
     #[test]

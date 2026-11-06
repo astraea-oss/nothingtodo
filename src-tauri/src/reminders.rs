@@ -29,7 +29,10 @@ fn report(app: &AppHandle, error: String) {
 }
 
 #[cfg(target_os = "android")]
-pub use android::{open_notification_settings, plugin, run, save_to_downloads};
+pub use android::{
+    Actions, apply_pressed, open_notification_settings, plugin, run, save_to_downloads,
+    schedule_json,
+};
 
 #[cfg(not(target_os = "android"))]
 pub fn open_notification_settings(_: &AppHandle) -> Result<(), String> {
@@ -39,7 +42,10 @@ pub fn open_notification_settings(_: &AppHandle) -> Result<(), String> {
 #[cfg(target_os = "android")]
 mod android {
     use super::{AppState, Emitter, Manager, mpsc, now_ms, report};
-    use nothingtodo_core::alarms::NotificationAction;
+    use nothingtodo_core::{
+        Store,
+        alarms::{Alarm, NotificationAction},
+    };
     use serde_json::json;
     use tauri::{
         AppHandle, Wry,
@@ -100,7 +106,7 @@ mod android {
     /// A notification button press from `Reminders.kt`'s action log.
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Pressed {
+    pub struct Pressed {
         key: String,
         task_id: String,
         remind_at: i64,
@@ -109,8 +115,45 @@ mod android {
     }
 
     #[derive(serde::Deserialize)]
-    struct Actions {
-        actions: Vec<Pressed>,
+    pub struct Actions {
+        pub actions: Vec<Pressed>,
+    }
+
+    /// Applies logged presses to the store. Returns whether anything needs uploading, and the
+    /// keys to acknowledge.
+    pub fn apply_pressed(
+        store: &mut Store,
+        pressed: &Actions,
+    ) -> Result<(bool, Vec<String>), String> {
+        let mut changed = false;
+        for p in &pressed.actions {
+            changed |=
+                store.apply_notification_action(&p.task_id, p.remind_at, &p.action, now_ms())?;
+        }
+        Ok((
+            changed,
+            pressed.actions.iter().map(|p| p.key.clone()).collect(),
+        ))
+    }
+
+    /// The list `Reminders.replace` arms, as `ScheduledReminder`s.
+    pub fn schedule_json(alarms: &[Alarm]) -> Vec<serde_json::Value> {
+        alarms
+            .iter()
+            .map(|a| {
+                json!({
+                    "id": a.notification_id,
+                    "at": a.at,
+                    "title": a.title,
+                    "taskId": a.task_id,
+                    "remindAt": a.remind_at,
+                    "warning": a.warning,
+                    "ring": a.ring,
+                    "quiet": a.quiet,
+                    "snooze": a.snooze_minutes,
+                })
+            })
+            .collect()
     }
 
     /// Runs a blocking plugin call off the async threads.
@@ -137,44 +180,17 @@ mod android {
         let pressed: Actions = call(app, "actions", json!({})).await?;
         let state = app.state::<AppState>();
         if !pressed.actions.is_empty() {
-            let mut changed = false;
-            {
-                let mut store = state.store.lock().await;
-                for p in &pressed.actions {
-                    changed |= store.apply_notification_action(
-                        &p.task_id,
-                        p.remind_at,
-                        &p.action,
-                        now_ms(),
-                    )?;
-                }
-            }
+            let (changed, keys) = apply_pressed(&mut *state.store.lock().await, &pressed)?;
             if changed {
                 let _ = state
                     .sync_trigger
                     .try_send(crate::sync_worker::Trigger::Edited);
             }
             let _ = app.emit("tasks-changed", ());
-            let keys: Vec<&str> = pressed.actions.iter().map(|p| p.key.as_str()).collect();
             call::<()>(app, "acknowledgeActions", json!({ "keys": keys })).await?;
         }
         let alarms = state.store.lock().await.alarms(now_ms())?;
-        let reminders: Vec<_> = alarms
-            .iter()
-            .map(|a| {
-                json!({
-                    "id": a.notification_id,
-                    "at": a.at,
-                    "title": a.title,
-                    "taskId": a.task_id,
-                    "remindAt": a.remind_at,
-                    "warning": a.warning,
-                    "ring": a.ring,
-                    "quiet": a.quiet,
-                    "snooze": a.snooze_minutes,
-                })
-            })
-            .collect();
+        let reminders = schedule_json(&alarms);
         call(app, "schedule", json!({ "reminders": reminders })).await
     }
 }
@@ -209,6 +225,11 @@ pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
             if let Err(error) = store.mark_notified(&id, due) {
                 report(&app, format!("Could not save alarm receipt: {error}"));
             }
+            // Sync now, and then every few seconds while it rings (see `ring::settle`), so a
+            // stop on another device silences it here too.
+            let _ = state
+                .sync_trigger
+                .try_send(crate::sync_worker::Trigger::Wake);
         }
         if app.notification().permission_state().ok() != Some(PermissionState::Granted) {
             checked = now;
@@ -356,6 +377,30 @@ pub mod ring {
             r.stop.store(true, Ordering::SeqCst);
         }
         taken
+    }
+
+    /// Stops a ringing alarm that another device has already answered: after a sync the task is
+    /// completed, deleted or moved to another time. Returns whether an alarm is still ringing.
+    pub async fn settle(app: &AppHandle) -> bool {
+        let Some(ringing) = current() else {
+            return false;
+        };
+        let state = app.state::<AppState>();
+        let still_due = {
+            let store = state.store.lock().await;
+            store
+                .snapshot()
+                .records
+                .get(&ringing.task_id)
+                .is_some_and(|record| {
+                    record.task.as_ref().is_some_and(|task| !task.completed)
+                        && record.reminder_at() == Some(ringing.at)
+                })
+        };
+        if !still_due && stop().is_some() {
+            let _ = app.emit("alarm-ringing", None::<Ringing>);
+        }
+        still_due
     }
 
     /// Stop counts as done: a one-off alarm completes and a repeating one moves on. Snooze moves it

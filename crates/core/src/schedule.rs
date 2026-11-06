@@ -26,6 +26,16 @@ impl SyncSchedule {
         self.due = Some(now + Duration::from_secs(30));
     }
 
+    /// Checks again within a few seconds, while something time-critical waits on other devices.
+    /// Retry backoff still wins during outages.
+    pub fn soon(&mut self, now: Duration) {
+        if self.failures > 0 {
+            return;
+        }
+        let due = now + Duration::from_secs(5);
+        self.due = Some(self.due.map_or(due, |existing| existing.min(due)));
+    }
+
     pub fn failed(&mut self, now: Duration) -> u64 {
         let seconds = (5_u64 << self.failures.min(6)).min(300);
         self.failures = self.failures.saturating_add(1);
@@ -76,5 +86,21 @@ mod tests {
             Some(Duration::from_secs(30))
         );
         assert_eq!(schedule.failed(Duration::from_secs(3)), 5);
+    }
+    #[test]
+    fn soon_shortens_the_wait_but_not_backoff() {
+        let mut schedule = SyncSchedule::default();
+        schedule.succeeded(Duration::ZERO);
+        schedule.soon(Duration::ZERO);
+        assert_eq!(schedule.delay(Duration::ZERO), Some(Duration::from_secs(5)));
+        schedule.failed(Duration::ZERO);
+        schedule.soon(Duration::ZERO);
+        assert_eq!(schedule.delay(Duration::ZERO), Some(Duration::from_secs(5)));
+        schedule.failed(Duration::ZERO);
+        schedule.soon(Duration::ZERO);
+        assert_eq!(
+            schedule.delay(Duration::ZERO),
+            Some(Duration::from_secs(10))
+        );
     }
 }

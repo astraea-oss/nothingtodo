@@ -5,6 +5,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
 
+/// Held across every sync pass in this process: the app's worker and Android's background sync
+/// must not run two passes at once.
+pub static NETWORK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub enum Trigger {
     Edited,
     Wake,
@@ -75,7 +79,10 @@ pub async fn run(app: tauri::AppHandle, mut receiver: mpsc::Receiver<Trigger>) {
         })
         .await;
         // The store lock is taken only for short commits inside `sync`.
-        let result = client.sync(&state.store).await;
+        let result = {
+            let _pass = NETWORK.lock().await;
+            client.sync(&state.store).await
+        };
         if client.is_cancelled() {
             // A replaced or disconnected session; its result says nothing about the new one.
             update(&app, |s| s.syncing = false).await;
@@ -116,5 +123,11 @@ pub async fn run(app: tauri::AppHandle, mut receiver: mpsc::Receiver<Trigger>) {
         .await;
         let _ = app.emit("tasks-changed", ());
         crate::reminders::request(&app);
+        // There is no push from the server, so while an alarm rings here, check every few seconds
+        // whether another device has stopped it.
+        #[cfg(not(target_os = "android"))]
+        if crate::reminders::ring::settle(&app).await {
+            schedule.soon(origin.elapsed());
+        }
     }
 }

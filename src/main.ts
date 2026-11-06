@@ -210,6 +210,8 @@ let selectedDay = startOfDay(Date.now());
 // The first day the timeline lists; today unless an earlier day was picked.
 let listStart = startOfDay(Date.now());
 let scrollTo: number | null = null;
+// The day the view last treated as today, so an app left open overnight moves on with it.
+let shownToday = startOfDay(Date.now());
 let expanded: string | null = null;
 let showUnscheduled = false;
 type Entry = [string, TaskRecord];
@@ -606,6 +608,14 @@ function details(id: string, record: TaskRecord, now: number) {
 }
 
 function render() {
+  const nowDay = startOfDay(Date.now());
+  if (nowDay !== shownToday) {
+    // Past midnight: a view that was on today follows to the new today, instead of opening
+    // on yesterday as an empty picked day.
+    if (selectedDay === shownToday) { selectedDay = nowDay; scrollTo = nowDay; }
+    if (listStart === shownToday) listStart = nowDay;
+    shownToday = nowDay;
+  }
   const parsed = parse(quick.value);
   const target = quickTarget(parsed);
   // Typing a day previews it, as in the design: the strip jumps there and the new row shows red.
