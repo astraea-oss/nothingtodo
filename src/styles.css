@@ -16,6 +16,9 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; overflow: hidden; }
+/* Scrollable areas scroll by wheel, touch and keys, without a visible scrollbar. */
+* { scrollbar-width: none; }
+*::-webkit-scrollbar { display: none; }
 button, input, textarea { font: inherit; color: inherit; }
 button { cursor: pointer; }
 :focus-visible { outline: 1.5px solid var(--fg); outline-offset: 2px; }
