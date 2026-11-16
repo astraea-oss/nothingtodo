@@ -213,6 +213,14 @@ body.dragging { user-select: none; -webkit-user-select: none; }
 
 /* Alarms: the RINGS tag on rows, and the ringing band on desktop */
 .gt-row .t .tag { margin-left: 8px; padding: 1px 5px; border: 1px solid var(--line); border-radius: 4px; font: 8.5px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); vertical-align: 2px; }
+/* A repeating series' unanswered occurrences: a red count on its row, and the dates in its
+   details, each with its own Done. */
+.gt-row .t .tag.missed { border-color: var(--red); color: var(--red); }
+.gt-missed { margin: 4px 0 8px; }
+.gt-missed .miss { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px dotted var(--line); }
+.gt-missed .miss:last-of-type { border-bottom: 0; }
+.gt-missed .miss .pill { padding: 3px 10px; font-size: 10px; }
+.gt-missed > .lbl { margin: 4px 0; }
 .ringing { position: relative; z-index: 2; margin: 8px 12px; padding: 14px 16px; border: 1.5px solid var(--red); border-radius: 18px; background: var(--surface); }
 .ringing .lbl { color: var(--red); }
 .ringing .ring-title { margin: 6px 0 4px; font-size: 20px; }

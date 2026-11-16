@@ -21,6 +21,7 @@ fn task(title: &str) -> Task {
         warnings: vec![],
         quiet: false,
         snooze_minutes: None,
+        done_ahead: vec![],
         extra: Default::default(),
     }
 }

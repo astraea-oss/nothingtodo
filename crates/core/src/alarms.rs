@@ -8,6 +8,10 @@ use std::collections::BTreeMap;
 /// later reminders are scheduled as earlier ones pass and the list is reconciled again.
 pub const MAX_SCHEDULED: usize = 64;
 
+/// How many occurrences of a repeating series are armed after the one delivered now, so the
+/// next ones still go off if the app and background sync do not run in between.
+const AHEAD: usize = 3;
+
 /// A reminder to schedule with the OS.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alarm {
@@ -93,10 +97,12 @@ impl NotificationIds {
 }
 
 impl Store {
-    /// Every notification the active tasks want, in any order: each reminder at its time (or a
-    /// later local snooze) and each warning before it. Markers notify only through warnings,
-    /// counted back from 09:00 on their day. `key` identifies the notification across rebuilds.
-    fn planned(&self) -> Vec<Planned> {
+    /// Every notification the active tasks want around `now`, in any order: each reminder at its
+    /// time (or a later local snooze) and each warning before it. A repeating series also arms
+    /// its next few open occurrences, so a missed or unanswered one never stops the next from
+    /// going off. Markers notify only through warnings, counted back from 09:00 on their day.
+    /// `key` identifies the notification across rebuilds.
+    fn planned(&self, now: i64) -> Vec<Planned> {
         let mut out = Vec::new();
         for (id, record) in &self.state.records {
             // A newer schema may schedule differently; leave it to the app that understands it.
@@ -108,39 +114,61 @@ impl Store {
                 continue;
             };
             let marker = task.kind() == crate::entries::Kind::Marker;
-            if !marker && let (Some(at), Some(remind_at)) = (record.reminder_at(), task.remind_at) {
-                out.push(Planned {
-                    key: id.clone(),
-                    task_id: id.clone(),
-                    at,
-                    remind_at,
-                    title: task.title.clone(),
-                    warning: false,
-                    ring: task.kind() == crate::entries::Kind::Alarm,
-                    quiet: task.quiet,
-                    snooze_minutes: task.snooze_minutes.unwrap_or(10),
-                });
-            }
-            let Ok(Some(base)) = task.warn_base() else {
-                continue;
+            // The occurrence delivered now: the latest one that has come due, or the stored one.
+            let (occurrence, at) = match record.due_at(now) {
+                Some(due) => (
+                    task.moved_to(due.0).unwrap_or_else(|_| task.clone()),
+                    Some(due),
+                ),
+                None => (task.clone(), None),
             };
-            for (i, &minutes) in task.warnings.iter().enumerate() {
-                let label = if marker && minutes == 0 {
-                    "today".to_string()
-                } else {
-                    format!("in {}", span(minutes))
+            // A series keys each occurrence separately, so answering one never cancels the next.
+            let key = |occurrence: &crate::Task| match (&task.repeat, occurrence.current()) {
+                (Some(_), Ok(start)) => format!("{id}@{start}"),
+                _ => id.clone(),
+            };
+            let mut occurrences = vec![(key(&occurrence), occurrence, at)];
+            for start in task.ahead(now, AHEAD).unwrap_or_default() {
+                let Ok(next) = task.moved_to(start) else {
+                    continue;
                 };
-                out.push(Planned {
-                    key: format!("{id}/{i}"),
-                    task_id: id.clone(),
-                    at: base - i64::from(minutes) * 60_000,
-                    remind_at: task.remind_at.unwrap_or(base),
-                    title: format!("{} · {label}", task.title),
-                    warning: true,
-                    ring: false,
-                    quiet: task.quiet,
-                    snooze_minutes: task.snooze_minutes.unwrap_or(10),
-                });
+                occurrences.push((key(&next), next, (!marker).then_some((start, start))));
+            }
+            for (key, occurrence, at) in occurrences {
+                if !marker && let Some((remind_at, at)) = at {
+                    out.push(Planned {
+                        key: key.clone(),
+                        task_id: id.clone(),
+                        at,
+                        remind_at,
+                        title: task.title.clone(),
+                        warning: false,
+                        ring: task.kind() == crate::entries::Kind::Alarm,
+                        quiet: task.quiet,
+                        snooze_minutes: task.snooze_minutes.unwrap_or(10),
+                    });
+                }
+                let Ok(Some(base)) = occurrence.warn_base() else {
+                    continue;
+                };
+                for (i, &minutes) in task.warnings.iter().enumerate() {
+                    let label = if marker && minutes == 0 {
+                        "today".to_string()
+                    } else {
+                        format!("in {}", span(minutes))
+                    };
+                    out.push(Planned {
+                        key: format!("{key}/{i}"),
+                        task_id: id.clone(),
+                        at: base - i64::from(minutes) * 60_000,
+                        remind_at: occurrence.remind_at.unwrap_or(base),
+                        title: format!("{} · {label}", task.title),
+                        warning: true,
+                        ring: false,
+                        quiet: task.quiet,
+                        snooze_minutes: task.snooze_minutes.unwrap_or(10),
+                    });
+                }
             }
         }
         out
@@ -149,7 +177,7 @@ impl Store {
     /// Warnings whose time falls in `(from, to]`, for desktop delivery from the running app.
     pub fn warnings_between(&self, from: i64, to: i64) -> Vec<(String, String)> {
         let mut due: Vec<_> = self
-            .planned()
+            .planned(to)
             .into_iter()
             .filter(|p| p.warning && p.at > from && p.at <= to)
             .collect();
@@ -162,27 +190,32 @@ impl Store {
     /// cause a burst of notifications. Assigns notification IDs as needed and drops those of
     /// finished tasks.
     pub fn alarms(&mut self, now: i64) -> Result<Vec<Alarm>> {
-        let mut upcoming: Vec<Planned> =
-            self.planned().into_iter().filter(|p| p.at > now).collect();
+        let planned = self.planned(now);
+        let mut upcoming: Vec<&Planned> = planned.iter().filter(|p| p.at > now).collect();
         upcoming.sort_by(|a, b| (a.at, &a.key).cmp(&(b.at, &b.key)));
         upcoming.truncate(MAX_SCHEDULED);
 
         let mut ids = self.state.notification_ids.clone();
+        // Occurrence keys go once their occurrence is neither delivered nor armed; the counter
+        // never hands their IDs out again, so a notification still showing keeps its own.
+        let live: std::collections::BTreeSet<_> = planned.iter().map(|p| p.key.as_str()).collect();
         ids.assigned.retain(|key, _| {
-            let task_id = key.split('/').next().unwrap_or(key);
-            self.state
-                .records
-                .get(task_id)
-                .is_some_and(|record| record.task.as_ref().is_some_and(|task| !task.completed))
+            let task_id = key.split(['/', '@']).next().unwrap_or(key);
+            (!key.contains('@') || live.contains(key.as_str()))
+                && self
+                    .state
+                    .records
+                    .get(task_id)
+                    .is_some_and(|record| record.task.as_ref().is_some_and(|task| !task.completed))
         });
         let alarms = upcoming
             .into_iter()
             .map(|p| Alarm {
                 notification_id: ids.assign(&p.key),
-                task_id: p.task_id,
+                task_id: p.task_id.clone(),
                 at: p.at,
                 remind_at: p.remind_at,
-                title: p.title,
+                title: p.title.clone(),
                 warning: p.warning,
                 ring: p.ring,
                 quiet: p.quiet,
@@ -214,28 +247,44 @@ impl Store {
         let Some(task) = record.task.as_ref().filter(|task| !task.completed) else {
             return Ok(false);
         };
+        let due = record.due_at(now);
         match *action {
             NotificationAction::Complete => {
-                // A repeating task only moves on for the occurrence that went off. Another device
-                // may already have completed it, and ticking again would skip the next one too.
-                let pressed_for_current = task.remind_at == Some(remind_at)
-                    || record.reminder_at() == Some(remind_at)
-                    || task.warn_base().ok().flatten() == Some(remind_at);
-                if task.repeat.is_some() && !pressed_for_current {
-                    return Ok(false);
+                if task.repeat.is_none() {
+                    let mut done = task.clone();
+                    done.completed = true;
+                    self.save_task(Some(task_id.into()), done)?;
+                    return Ok(true);
                 }
-                let mut done = task.clone();
-                done.completed = true;
-                self.save_task(Some(task_id.into()), done)?;
-                Ok(true)
+                // A repeating task only marks the occurrence that went off, which may be a later
+                // one than the oldest still open. Another device may already have completed it,
+                // and ticking again would mark the next one too.
+                let occurrence = if due.is_some_and(|(_, at)| at == remind_at) {
+                    due.map(|(occurrence, _)| occurrence)
+                } else if record.reminder_at() == Some(remind_at)
+                    || task.warn_base().ok().flatten() == Some(remind_at)
+                {
+                    task.current().ok()
+                } else {
+                    Some(remind_at)
+                };
+                match occurrence {
+                    Some(start) => self.complete_occurrence(task_id, start),
+                    None => Ok(false),
+                }
             }
             NotificationAction::Snooze { until } => {
-                if task.remind_at == Some(remind_at) && until > now && until > remind_at {
+                let of = due
+                    .map(|(occurrence, _)| occurrence)
+                    .filter(|&occurrence| occurrence == remind_at)
+                    .or_else(|| (task.remind_at == Some(remind_at)).then_some(remind_at));
+                if let Some(of) = of
+                    && until > now
+                    && until > remind_at
+                {
                     let mut state = self.snapshot();
-                    state.records.get_mut(task_id).unwrap().snooze = Some(crate::Snooze {
-                        of: remind_at,
-                        until,
-                    });
+                    state.records.get_mut(task_id).unwrap().snooze =
+                        Some(crate::Snooze { of, until });
                     self.commit(state)?;
                 }
                 Ok(false)
@@ -265,6 +314,7 @@ mod tests {
             warnings: vec![],
             quiet: false,
             snooze_minutes: None,
+            done_ahead: vec![],
             extra: Default::default(),
         }
     }

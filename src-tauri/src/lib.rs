@@ -223,6 +223,41 @@ async fn sync_now(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /// The next occurrences of a task being edited, from the same engine that rolls series forward.
+/// Repeating series with missed occurrences, and the next one armed meanwhile, by task ID.
+#[tauri::command]
+async fn behind(
+    state: State<'_, AppState>,
+) -> Result<std::collections::BTreeMap<String, nothingtodo_core::Behind>, String> {
+    Ok(state.store.lock().await.behind(reminders::now_ms()))
+}
+
+/// Marks one occurrence of a repeating series done (`at` is its start).
+#[tauri::command]
+async fn complete_occurrence(
+    state: State<'_, AppState>,
+    id: String,
+    at: i64,
+) -> Result<(), String> {
+    if state.store.lock().await.complete_occurrence(&id, at)? {
+        state.edited();
+    }
+    Ok(())
+}
+
+/// Marks every missed occurrence of a repeating series done.
+#[tauri::command]
+async fn complete_missed(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    if state
+        .store
+        .lock()
+        .await
+        .complete_missed(&id, reminders::now_ms())?
+    {
+        state.edited();
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn preview_occurrences(task: Task, count: usize) -> Result<Vec<i64>, String> {
     task.upcoming(count.min(8))
@@ -326,6 +361,9 @@ pub fn run() {
             sync_status,
             open_notification_settings,
             preview_occurrences,
+            behind,
+            complete_occurrence,
+            complete_missed,
             ringing_alarm,
             answer_alarm,
             refresh_reminders,
