@@ -213,6 +213,14 @@ pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
             if task.kind() != nothingtodo_core::entries::Kind::Alarm {
                 continue;
             }
+            // An alarm found long after its time, say after the computer slept or the app was
+            // closed, would ring for a moment already gone; it stays as an overdue entry instead.
+            if now - due > ring::LIMIT_MS {
+                if let Err(error) = store.mark_notified(&id, due) {
+                    report(&app, format!("Could not save alarm receipt: {error}"));
+                }
+                continue;
+            }
             // Alarms ring from the app itself, so they need no notification permission.
             ring::start(
                 &app,
@@ -279,7 +287,7 @@ pub mod ring {
     };
     use tauri::{AppHandle, Emitter, Manager};
 
-    const LIMIT_MS: i64 = 10 * 60 * 1000;
+    pub const LIMIT_MS: i64 = 10 * 60 * 1000;
     const SOUNDS: [&str; 2] = [
         "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga",
         "/usr/share/sounds/freedesktop/stereo/complete.oga",
@@ -394,7 +402,7 @@ pub mod ring {
                 .get(&ringing.task_id)
                 .is_some_and(|record| {
                     record.task.as_ref().is_some_and(|task| !task.completed)
-                        && record.reminder_at() == Some(ringing.at)
+                        && record.due_at(now_ms()).map(|(_, at)| at) == Some(ringing.at)
                 })
         };
         if !still_due && stop().is_some() {

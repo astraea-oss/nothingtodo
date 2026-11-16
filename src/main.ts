@@ -19,6 +19,7 @@ interface Task {
   schemaVersion: number; title: string; notes: string; completed: boolean; remindAt: number | null;
   kind?: 'reminder' | 'marker' | 'alarm'; date?: string; durationMinutes?: number; repeat?: Repeat;
   repeatFrom?: number; timeZone?: string; warnings?: number[]; quiet?: boolean; snoozeMinutes?: number;
+  doneAhead?: number[];
 }
 interface Remote { key: string; value: Task | null; version: number; deleted: boolean }
 interface TaskRecord { task: Task | null; version: number; dirty: boolean; conflict: Remote | null; notifiedAt: number | null; localRevision: number; snooze: { of: number; until: number } | null; unsupported: { value: unknown; version: number } | null }
@@ -28,6 +29,9 @@ interface SyncStatus {
 }
 declare const __APP_VERSION__: string, __APP_COMMIT__: string;
 interface Snapshot { records: Record<string, TaskRecord>; cursor: number; binding: string | null }
+// A repeating series with missed occurrences (oldest first; the first is the stored one) and the
+// next one, which the core arms and rings meanwhile.
+interface Behind { missed: number[]; next: number | null }
 
 const root = document.querySelector<HTMLDivElement>('#app')!;
 root.innerHTML = `
@@ -128,6 +132,7 @@ const sheet = $<HTMLDivElement>('#sheet');
 const settings = $<HTMLDivElement>('#settings');
 $('#about').textContent = `NothingToDo ${__APP_VERSION__}${__APP_COMMIT__ ? ` · build ${__APP_COMMIT__}` : ''}`;
 let data: Snapshot = { records: {}, cursor: 0, binding: null };
+let behind: Record<string, Behind> = {};
 let editing: string | null = null;
 let busy = false;
 let notificationsOff = false;
@@ -169,7 +174,7 @@ async function run(action: () => Promise<void> | void) {
   finally { busy = false; root.removeAttribute('aria-busy'); }
 }
 async function refresh() {
-  data = await invoke<Snapshot>('snapshot');
+  [data, behind] = await Promise.all([invoke<Snapshot>('snapshot'), invoke<Record<string, Behind>>('behind')]);
   render();
 }
 async function save(id: string | null, task: Task) {
@@ -214,7 +219,8 @@ let scrollTo: number | null = null;
 let shownToday = startOfDay(Date.now());
 let expanded: string | null = null;
 let showUnscheduled = false;
-type Entry = [string, TaskRecord];
+// A third element marks the next occurrence of a series that is behind, shown on its own day.
+type Entry = [string, TaskRecord, number?];
 
 // ── Typing in the bar: "Call the bank fri 8am" ──
 const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
@@ -336,7 +342,11 @@ function loadOn(day: number, now: number) {
   const next = addDays(day, 1);
   const open = Object.values(data.records).filter(r => r.task && !r.task.completed && !r.unsupported);
   const dues = open.map(reminderAt).filter((d): d is number => d !== null && d >= day && d < next);
-  const marks = open.filter(r => markerDay(r) === day).length;
+  let marks = open.filter(r => markerDay(r) === day).length;
+  for (const [id, b] of Object.entries(behind)) {
+    if (b.next === null || b.next < day || b.next >= next) continue;
+    if (data.records[id]?.task?.kind === 'marker') marks++; else dues.push(b.next);
+  }
   return [...Array(marks).fill(''), ...dues.map(due => (due <= now ? 'r' : ''))] as string[];
 }
 function dayCell(day: number, shownDay: number, now: number, month: number, letter: boolean) {
@@ -544,6 +554,8 @@ function row(id: string, record: TaskRecord, now: number, showDay = false) {
     : due === null ? '—' : clock(due);
   const title = el('span', `t${done ? ' done' : ''}`, task?.title ?? (readOnly ? 'From a newer app version' : 'Deleted on this device'));
   if (alarm && !done) title.append(el('span', 'tag', 'rings'));
+  const missed = behind[id]?.missed.length ?? 0;
+  if (missed && !done) title.append(el('span', 'tag missed', `missed ${missed}`));
   // Sync glyphs: synced is silent, pending a ring, conflict a red dot.
   const sy = el('span', record.conflict ? 'sy c' : record.dirty && sync.connected ? 'sy p' : 'sy');
   const tm = el('span', `tm${marker ? ' ad' : ''}${late ? ' red' : done ? ' dim' : ''}`);
@@ -558,12 +570,57 @@ function row(id: string, record: TaskRecord, now: number, showDay = false) {
   if (expanded === id || record.conflict) gutter.append(details(id, record, now));
 }
 
+// The next occurrence of a series with missed ones: it rings as usual, and ticking it marks
+// only that occurrence. Tapping it opens the series' own row, where the misses are listed.
+function armedRow(id: string, record: TaskRecord, at: number, now: number, showDay = false) {
+  const task = record.task!;
+  const marker = task.kind === 'marker';
+  const line = el('div', 'gt-row');
+  const node = el('button', `node${marker ? ' mk' : task.kind === 'alarm' ? ' al' : ''}`);
+  node.type = 'button';
+  node.setAttribute('aria-label', `Complete ${task.title} on ${shortDay(at)}`);
+  node.addEventListener('click', event => {
+    event.stopPropagation();
+    void run(async () => { await invoke('complete_occurrence', { id, at }); await refresh(); });
+  });
+  const title = el('span', 't', task.title);
+  if (task.kind === 'alarm') title.append(el('span', 'tag', 'rings'));
+  title.append(el('span', 'tag', 'armed'));
+  const tm = el('span', `tm${marker ? ' ad' : ''}`);
+  if (showDay && !marker) tm.append(el('span', 'd', shortDay(at)));
+  tm.append(document.createTextNode(marker ? (showDay ? shortDay(at) : 'all day') : clock(at)));
+  line.append(tm, node, title, el('span', 'n', marker ? '' : countdown(at, now)), el('span', 'sy'));
+  line.addEventListener('click', () => { if (lifted) return; expanded = expanded === id ? null : id; render(); });
+  gutter.append(line);
+}
+
+// Missed occurrences of a series, each with its own Done, and one Done for all of them.
+function missedList(id: string, list: number[], marker: boolean) {
+  const box = el('div', 'gt-missed');
+  const shown = list.slice(0, 8);
+  for (const at of shown) {
+    const line = el('div', 'miss');
+    line.append(el('span', 'lbl red', marker ? longDay(at) : `${longDay(at)} · ${clock(at)}`),
+      pill('Done', async () => { await invoke('complete_occurrence', { id, at }); await refresh(); }));
+    box.append(line);
+  }
+  if (list.length > shown.length) box.append(el('p', 'lbl', `and ${list.length - shown.length} more`));
+  if (list.length > 1) {
+    const actions = el('div', 'row-actions');
+    actions.append(pill('All done', async () => { await invoke('complete_missed', { id }); await refresh(); }, 'on'));
+    box.append(actions);
+  }
+  return box;
+}
+
 function details(id: string, record: TaskRecord, now: number) {
   const task = record.task;
   const readOnly = record.unsupported !== null;
   const due = reminderAt(record);
   const box = el('div', 'gt-detail');
   if (task?.notes) box.append(el('p', 'notes', task.notes));
+  const late = behind[id];
+  if (task && !readOnly && late?.missed.length) box.append(missedList(id, late.missed, task.kind === 'marker'));
   const facts = [
     task?.durationMinutes ? durationText(task.durationMinutes).join(' ').trim() : '',
     task?.repeat ? `repeats ${repeatText(task.repeat).join(' ').trim().toLowerCase()}` : '',
@@ -580,14 +637,16 @@ function details(id: string, record: TaskRecord, now: number) {
     actions.append(pill('Edit', () => openSheet(id)));
     // Only a reminder that has gone off can be snoozed; snoozing earlier would bring it forward.
     if (!task.completed && due !== null && due <= now) actions.append(pill(`Snooze ${task.snoozeMinutes ?? 10}m`, async () => { await invoke('snooze_task', { id, minutes: task.snoozeMinutes ?? 10 }); await refresh(); }));
-    if (task.repeat) {
+    if (task.repeat && !late?.missed.length) {
       // Skipping moves the series on without marking anything done.
       actions.append(pill('Skip this one', async () => {
         await save(id, { ...task, completed: true });
         const next = data.records[id]?.task;
         status(`Skipped · next ${next?.remindAt != null ? `${shortDay(next.remindAt)} · ${clock(next.remindAt)}` : next?.date ? shortDay(new Date(`${next.date}T00:00`).getTime()) : ''}`);
       }));
-      const { repeat: _r, repeatFrom: _f, ...single } = task;
+    }
+    if (task.repeat) {
+      const { repeat: _r, repeatFrom: _f, doneAhead: _d, ...single } = task;
       actions.append(pill('End repeat', () => save(id, single)));
     }
     actions.append(pill(task.repeat ? 'Delete all' : 'Delete', async () => { await invoke('delete_task', { id }); expanded = null; await refresh(); }));
@@ -643,10 +702,13 @@ function render() {
   // then a band per month. Days with nothing show only when picked in the strip, or today.
   const first = Math.min(listStart, shownDay);
   // Open tasks from before the timeline starts collect in one Overdue band, wherever it starts.
-  const overdue = rest.filter(([, r]) => !r.task!.completed && reminderAt(r) !== null && reminderAt(r)! < first);
+  // A repeating marker whose day passed unticked waits here too, like any missed occurrence.
+  const shownAt = (r: TaskRecord) => reminderAt(r) ?? markerDay(r);
+  const overdue = rest.filter(([id, r]) => !r.task!.completed && (reminderAt(r) !== null
+    ? reminderAt(r)! < first : !!behind[id] && markerDay(r) !== null && markerDay(r)! < first));
   if (overdue.length) {
-    const firstDue = startOfDay(reminderAt(overdue[0][1])!);
-    const same = overdue.every(([, r]) => startOfDay(reminderAt(r)!) === firstDue);
+    const firstDue = startOfDay(shownAt(overdue[0][1])!);
+    const same = overdue.every(([, r]) => startOfDay(shownAt(r)!) === firstDue);
     band(same ? `Overdue · ${shortDay(firstDue)}` : 'Overdue', String(overdue.length), 'red');
     for (const [id, r] of overdue) row(id, r, now, !same);
   }
@@ -659,6 +721,12 @@ function render() {
     if (day === null || day < first) continue;
     byDay.set(day, [...(byDay.get(day) ?? []), entry]);
   }
+  for (const [id, b] of Object.entries(behind)) {
+    const record = data.records[id];
+    if (b.next === null || !record?.task || startOfDay(b.next) < first) continue;
+    const day = startOfDay(b.next);
+    byDay.set(day, [...(byDay.get(day) ?? []), [id, record, b.next]]);
+  }
   for (const day of [shownDay, today, newDay]) if (day !== null && day >= first && !byDay.has(day)) byDay.set(day, []);
   const horizon = addDays(first, 14);
   const newRow = (marker: boolean) => {
@@ -668,8 +736,12 @@ function render() {
     gutter.append(line);
   };
   // Markers first, then timed rows in order.
+  const isMarker = (e: Entry) => e[1].task?.kind === 'marker';
+  const dueOf = (e: Entry) => isMarker(e) ? null : e[2] ?? reminderAt(e[1]);
   const ordered = (list: Entry[]) => [...list].sort((a, b) =>
-    Number(markerDay(b[1]) !== null) - Number(markerDay(a[1]) !== null) || (reminderAt(a[1]) ?? 0) - (reminderAt(b[1]) ?? 0));
+    Number(isMarker(b)) - Number(isMarker(a)) || (dueOf(a) ?? 0) - (dueOf(b) ?? 0));
+  const draw = (entry: Entry, showDay = false) => entry[2] === undefined
+    ? row(entry[0], entry[1], now, showDay) : armedRow(entry[0], entry[1], entry[2], now, showDay);
   let month: number | null = null;
   for (const day of [...byDay.keys()].sort((a, b) => a - b)) {
     const list = ordered(byDay.get(day)!);
@@ -682,7 +754,7 @@ function render() {
         band(label, String(inMonth.reduce((n, [, l]) => n + l.length, 0)), '', undefined, day);
       }
       if (newDay === day) newRow(target === null);
-      for (const [id, r] of list) row(id, r, now, true);
+      for (const entry of list) draw(entry, true);
       continue;
     }
     const adding = newDay === day;
@@ -691,11 +763,11 @@ function render() {
     if (adding && target === null) newRow(true);
     let drewNow = day !== today;
     let drewNew = !adding || target === null;
-    for (const [id, r] of list) {
-      const due = markerDay(r) === null ? reminderAt(r) : null;
+    for (const entry of list) {
+      const due = dueOf(entry);
       if (due !== null && !drewNew && target! <= due) { newRow(false); drewNew = true; }
       if (due !== null && !drewNow && now <= due) { nowLine(now); drewNow = true; }
-      row(id, r, now);
+      draw(entry);
     }
     if (!drewNew) newRow(false);
     if (!drewNow) nowLine(now);
@@ -1559,7 +1631,11 @@ document.addEventListener('keydown', event => {
   }
 });
 // Keep the NOW line and countdowns current.
-setInterval(() => { if (!busy && sheet.hidden && !quick.value) render(); }, 30_000);
+// Also re-reads which series are behind, since an occurrence passing changes that.
+setInterval(() => {
+  if (busy || !sheet.hidden || quick.value) return;
+  if (isTauri()) void refresh().catch(error => status(String(error))); else render();
+}, 30_000);
 
 async function start() {
   if (!isTauri()) {

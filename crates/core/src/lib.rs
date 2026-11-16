@@ -59,6 +59,12 @@ pub struct Task {
     /// on the device that pressed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snooze_minutes: Option<u32>,
+    /// Schema 2 repeats: occurrences after the current one that are already done (their starts,
+    /// as `current` counts them), in order. A repeating task stands for its oldest open
+    /// occurrence, so a later one completed first, such as today's while earlier days are still
+    /// missed, is remembered here and skipped when the series reaches it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done_ahead: Vec<i64>,
     /// Fields added by newer app versions within the same schema. They are additive by
     /// definition (a behavioural change needs a new schema version), so they are kept and sent
     /// back unchanged.
@@ -83,6 +89,7 @@ impl Task {
             || !self.warnings.is_empty()
             || self.quiet
             || self.snooze_minutes.is_some()
+            || !self.done_ahead.is_empty()
         {
             2
         } else {
@@ -135,7 +142,7 @@ impl Task {
     }
 
     /// The occurrence this task currently stands for: its time, or a marker's day.
-    fn current(&self) -> Result<i64> {
+    pub(crate) fn current(&self) -> Result<i64> {
         if self.kind() == entries::Kind::Marker {
             self.marker_start()
         } else {
@@ -228,6 +235,128 @@ impl Task {
         Ok(out)
     }
 
+    /// This task moved on past the current occurrence and any later ones already done ahead.
+    pub fn advanced(&self) -> Result<Option<Task>> {
+        let mut next = self.rolled()?;
+        while let Some(task) = next.as_mut() {
+            let current = task.current()?;
+            task.done_ahead.retain(|&done| done >= current);
+            if task.done_ahead.first() != Some(&current) {
+                break;
+            }
+            task.done_ahead.remove(0);
+            next = task.rolled()?;
+        }
+        Ok(next)
+    }
+
+    /// The same task standing for the occurrence that starts at `start`.
+    pub(crate) fn moved_to(&self, start: i64) -> Result<Task> {
+        let mut task = self.clone();
+        if self.kind() == entries::Kind::Marker {
+            let day = jiff::Timestamp::from_millisecond(start)
+                .map_err(|e| e.to_string())?
+                .to_zoned(self.zone()?)
+                .date();
+            task.date = Some(day.to_string());
+        } else {
+            task.remind_at = Some(start);
+        }
+        task.completed = false;
+        Ok(task)
+    }
+
+    /// When the occurrence starting at `start` has passed: at its time, or when a marker's day
+    /// ends.
+    fn passes_at(&self, start: i64) -> Result<i64> {
+        if self.kind() != entries::Kind::Marker {
+            return Ok(start);
+        }
+        let zone = self.zone()?;
+        let day = jiff::Timestamp::from_millisecond(start)
+            .map_err(|e| e.to_string())?
+            .to_zoned(zone.clone())
+            .date();
+        Ok(day
+            .tomorrow()
+            .map_err(|e| e.to_string())?
+            .to_zoned(zone)
+            .map_err(|e| e.to_string())?
+            .timestamp()
+            .as_millisecond())
+    }
+
+    /// Starts of the series' occurrences in `[from, to)`, in order, at most `MAX_STEPS`.
+    fn starts_in(&self, from: i64, to: i64) -> Result<Vec<i64>> {
+        let starts = |task: &Task| -> Result<Vec<i64>> {
+            Ok(task
+                .entry()?
+                .occurrences(from, to)?
+                .into_iter()
+                .map(|(_, at)| at.timestamp().as_millisecond())
+                .collect())
+        };
+        let found = starts(self)?;
+        if found.is_empty() && self.repeat_from.is_some() {
+            // Very old anchors can exceed the engine's step bound; count from now instead.
+            let mut recent = self.clone();
+            recent.repeat_from = Some(self.current()?);
+            return starts(&recent);
+        }
+        Ok(found)
+    }
+
+    /// Open occurrences of a repeating series that have passed by `now`, oldest first: the
+    /// current one and later ones not done ahead. Time passing never removes one; only
+    /// completing it does. Empty for one-off tasks and when the current one is still ahead.
+    pub fn missed(&self, now: i64) -> Result<Vec<i64>> {
+        if self.repeat.is_none() || self.completed {
+            return Ok(vec![]);
+        }
+        let current = self.current()?;
+        if self.passes_at(current)? > now {
+            return Ok(vec![]);
+        }
+        let mut out = vec![current];
+        for start in self.starts_in(current + 1, now.saturating_add(1))? {
+            if self.passes_at(start)? > now {
+                break;
+            }
+            if !self.done_ahead.contains(&start) {
+                out.push(start);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The next `count` open occurrences of a repeating series after the current one that have
+    /// not passed by `now`. These are armed even while earlier ones are still open, so a
+    /// missed day never stops the next from ringing.
+    pub fn ahead(&self, now: i64, count: usize) -> Result<Vec<i64>> {
+        if self.repeat.is_none() || self.completed || count == 0 {
+            return Ok(vec![]);
+        }
+        let current = self.current()?;
+        // Markers pass a day after they start, so look from a little before now.
+        let mut from = current
+            .saturating_add(1)
+            .max(now.saturating_sub(2 * 86_400_000));
+        let mut out = Vec::new();
+        for span in [8 * 86_400_000, 2 * 366 * 86_400_000_i64] {
+            let to = now.saturating_add(span);
+            for start in self.starts_in(from, to)? {
+                if self.passes_at(start)? > now && !self.done_ahead.contains(&start) {
+                    out.push(start);
+                    if out.len() == count {
+                        return Ok(out);
+                    }
+                }
+            }
+            from = from.max(to);
+        }
+        Ok(out)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if !(1..=SCHEMA_VERSION).contains(&self.schema_version) {
             return Err("Unsupported task schema; update the app before syncing.".into());
@@ -260,6 +389,13 @@ impl Task {
             .is_some_and(|m| m == 0 || m > 7 * 24 * 60)
         {
             return Err("Durations run from a minute to a week.".into());
+        }
+        if !self.done_ahead.is_empty()
+            && (self.repeat.is_none()
+                || self.done_ahead.len() > 64
+                || self.done_ahead.windows(2).any(|w| w[0] >= w[1]))
+        {
+            return Err("Done-ahead occurrences need a repeat, in order, at most 64.".into());
         }
         if self.warnings.len() > 8 || self.warnings.iter().any(|&w| w > 31 * 24 * 60) {
             return Err("Use up to 8 warnings, each at most a month before.".into());
@@ -304,6 +440,15 @@ pub struct Remote {
     pub value: Option<Task>,
     pub version: u64,
     pub deleted: bool,
+}
+
+/// A repeating series with open occurrences that have passed: `missed` oldest first (the first
+/// is the stored current one), and `next`, the next occurrence armed meanwhile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Behind {
+    pub missed: Vec<i64>,
+    pub next: Option<i64>,
 }
 
 /// A device-local snooze of the reminder that was due at `of`. Never synced, and ignored once the
@@ -362,10 +507,29 @@ impl Record {
     /// A snooze can only delay a reminder, never bring it forward.
     pub fn reminder_at(&self) -> Option<i64> {
         let remind_at = self.task.as_ref()?.remind_at?;
-        Some(match self.snooze {
-            Some(snooze) if snooze.of == remind_at && snooze.until > remind_at => snooze.until,
-            _ => remind_at,
-        })
+        Some(self.snoozed(remind_at))
+    }
+
+    fn snoozed(&self, of: i64) -> i64 {
+        match self.snooze {
+            Some(snooze) if snooze.of == of && snooze.until > of => snooze.until,
+            _ => of,
+        }
+    }
+
+    /// The occurrence this device delivers around `now`, and when (a snooze moves it): the
+    /// latest open occurrence that has come due, so a series with missed days rings for today's,
+    /// not the oldest miss; otherwise the stored reminder time. None for markers and untimed
+    /// tasks.
+    pub fn due_at(&self, now: i64) -> Option<(i64, i64)> {
+        let task = self.task.as_ref()?;
+        let stored = task.remind_at?;
+        let occurrence = task
+            .missed(now)
+            .ok()
+            .and_then(|missed| missed.last().copied())
+            .unwrap_or(stored);
+        Some((occurrence, self.snoozed(occurrence)))
     }
 }
 
@@ -445,20 +609,32 @@ impl Store {
             .and_then(|r| r.task.clone());
         if task.repeat.is_none() {
             task.repeat_from = None;
+            task.done_ahead.clear();
         } else if stored.as_ref().is_none_or(|s| {
             s.repeat != task.repeat || s.remind_at != task.remind_at || s.date != task.date
         }) {
             // A new or changed series counts from the occurrence being saved.
             task.repeat_from = Some(task.current()?);
+            task.done_ahead.clear();
+        } else if task.done_ahead.is_empty()
+            && let Some(stored) = &stored
+        {
+            // Editors that only know older fields keep what is already done ahead.
+            task.done_ahead.clone_from(&stored.done_ahead);
         }
-        // Ticking an occurrence of a repeating task moves it on to the next one.
+        // Ticking an occurrence of a repeating task moves it on to the next open one.
         if task.completed && task.repeat.is_some() && stored.as_ref().is_some_and(|s| !s.completed)
         {
             task.schema_version = task.needed_schema();
-            if let Some(next) = task.rolled()? {
+            if let Some(next) = task.advanced()? {
                 task = next;
             }
         }
+        self.put_task(id, task)
+    }
+
+    /// Validates and stores a task exactly as given, with no series handling.
+    fn put_task(&mut self, id: Option<String>, mut task: Task) -> Result<String> {
         task.schema_version = task.needed_schema();
         task.validate()?;
         let mut state = self.snapshot();
@@ -531,7 +707,7 @@ impl Store {
             .filter(|(_, record)| record.editable())
             .filter_map(|(id, record)| {
                 let task = record.task.as_ref()?;
-                let due = record.reminder_at()?;
+                let (_, due) = record.due_at(now)?;
                 (!task.completed && due <= now && record.notified_at != Some(due))
                     .then(|| (id.clone(), task.clone(), due))
             })
@@ -546,17 +722,102 @@ impl Store {
         if !record.editable() {
             return Err("This task was changed by a newer version of NothingToDo. Update the app to edit it.".into());
         }
-        let of = record
+        let (of, due) = record
             .task
             .as_ref()
             .filter(|task| !task.completed)
-            .and_then(|task| task.remind_at)
+            .and_then(|_| record.due_at(now))
             .ok_or("Only active tasks with a reminder can be snoozed.")?;
-        if record.reminder_at().is_none_or(|due| due > now) || until <= now {
+        if due > now || until <= now {
             return Err("Only a reminder that has gone off can be snoozed.".into());
         }
         record.snooze = Some(Snooze { of, until });
         self.commit(state)
+    }
+
+    /// Marks one occurrence of a repeating series done. The current (oldest open) one moves the
+    /// series on; a later one is remembered as done ahead. Returns whether anything changed.
+    pub fn complete_occurrence(&mut self, id: &str, start: i64) -> Result<bool> {
+        let Some(task) = self
+            .state
+            .records
+            .get(id)
+            .filter(|r| r.editable())
+            .and_then(|r| r.task.clone())
+            .filter(|t| !t.completed && t.repeat.is_some())
+        else {
+            return Ok(false);
+        };
+        let current = task.current()?;
+        if start == current {
+            let mut done = task;
+            done.completed = true;
+            self.save_task(Some(id.into()), done)?;
+            return Ok(true);
+        }
+        if start < current
+            || task.done_ahead.contains(&start)
+            || task.starts_in(start, start + 1)?.first() != Some(&start)
+        {
+            return Ok(false);
+        }
+        let mut done = task;
+        done.done_ahead.push(start);
+        done.done_ahead.sort_unstable();
+        self.put_task(Some(id.into()), done)?;
+        Ok(true)
+    }
+
+    /// Marks every missed occurrence of a repeating series done, so it stands for the next one
+    /// that has not passed. Returns whether anything changed.
+    pub fn complete_missed(&mut self, id: &str, now: i64) -> Result<bool> {
+        let Some(task) = self
+            .state
+            .records
+            .get(id)
+            .filter(|r| r.editable())
+            .and_then(|r| r.task.clone())
+        else {
+            return Ok(false);
+        };
+        if task.missed(now)?.is_empty() {
+            return Ok(false);
+        }
+        let mut next = match task.ahead(now, 1)?.first() {
+            Some(&start) => task.moved_to(start)?,
+            // The series has ended.
+            None => {
+                let mut done = task.clone();
+                done.completed = true;
+                done
+            }
+        };
+        if let Some(current) = next.current().ok().filter(|_| !next.completed) {
+            next.done_ahead.retain(|&done| done > current);
+        } else {
+            next.done_ahead.clear();
+        }
+        self.put_task(Some(id.into()), next)?;
+        Ok(true)
+    }
+
+    /// Missed and next occurrences of each open repeating series that has fallen behind, for
+    /// display.
+    pub fn behind(&self, now: i64) -> BTreeMap<String, Behind> {
+        self.state
+            .records
+            .iter()
+            .filter(|(_, r)| r.editable())
+            .filter_map(|(id, record)| {
+                let task = record.task.as_ref()?;
+                let missed = task.missed(now).ok()?;
+                if missed.is_empty() {
+                    return None;
+                }
+                let next = task.ahead(now, 1).ok()?.first().copied();
+                Some((id.clone(), Behind { missed, next }))
+            })
+            .collect()
     }
 
     pub fn mark_notified(&mut self, id: &str, due: i64) -> Result<()> {
@@ -589,6 +850,7 @@ mod tests {
             warnings: vec![],
             quiet: false,
             snooze_minutes: None,
+            done_ahead: vec![],
             extra: Default::default(),
         }
     }
@@ -775,6 +1037,222 @@ mod tests {
                 .remind_at,
             Some(ms("2026-11-03T07:00:00Z"))
         );
+    }
+
+    fn daily() -> entries::Repeat {
+        entries::Repeat::Calendar {
+            unit: entries::Unit::Day,
+            every: 1,
+            weekdays: vec![],
+        }
+    }
+
+    #[test]
+    fn missed_occurrences_stay_open_while_the_next_ones_still_ring() {
+        let mut store = Store::open(":memory:").unwrap();
+        let mut wakeup = repeating("2026-11-13T05:30:00Z", daily());
+        wakeup.kind = Some(entries::Kind::Alarm);
+        let id = store.save_task(None, wakeup).unwrap();
+        let day = |d: u32| ms(&format!("2026-11-{d}T05:30:00Z"));
+        let task = |store: &Store| store.snapshot().records[&id].task.clone().unwrap();
+
+        // Monday 00:33: Friday to Sunday were never answered.
+        let now = ms("2026-11-16T00:33:00Z");
+        assert_eq!(
+            task(&store).missed(now).unwrap(),
+            [day(13), day(14), day(15)]
+        );
+        let behind = store.behind(now);
+        assert_eq!(behind[&id].next, Some(day(16)));
+        // Monday's still rings, and the few after it are armed too.
+        let rings: Vec<_> = store
+            .alarms(now)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.task_id == id)
+            .map(|a| (a.at, a.remind_at, a.ring))
+            .collect();
+        assert_eq!(
+            rings,
+            [
+                (day(16), day(16), true),
+                (day(17), day(17), true),
+                (day(18), day(18), true)
+            ]
+        );
+        let ids: std::collections::BTreeSet<_> = store
+            .alarms(now)
+            .unwrap()
+            .iter()
+            .map(|a| a.notification_id)
+            .collect();
+        assert_eq!(ids.len(), 3);
+        // Time passing removes nothing: on Monday evening Monday's is missed as well.
+        assert_eq!(task(&store).missed(day(16) + 3_600_000).unwrap().len(), 4);
+
+        // Monday's is stopped from its notification: only Monday is marked.
+        let at = day(16) + 60_000;
+        let complete = alarms::NotificationAction::Complete;
+        assert!(
+            store
+                .apply_notification_action(&id, day(16), &complete, at)
+                .unwrap()
+        );
+        assert_eq!(task(&store).remind_at, Some(day(13)));
+        assert_eq!(task(&store).done_ahead, [day(16)]);
+        assert_eq!(
+            task(&store).missed(at).unwrap(),
+            [day(13), day(14), day(15)]
+        );
+        assert_eq!(task(&store).ahead(at, 1).unwrap(), [day(17)]);
+        // The same press arriving again, from another device, changes nothing.
+        assert!(
+            !store
+                .apply_notification_action(&id, day(16), &complete, at)
+                .unwrap()
+        );
+
+        // Ticking the oldest moves on one day.
+        let mut done = task(&store);
+        done.completed = true;
+        store.save_task(Some(id.clone()), done).unwrap();
+        assert_eq!(task(&store).remind_at, Some(day(14)));
+        // Marking Sunday from the list, then Saturday, skips past Monday, already done.
+        assert!(store.complete_occurrence(&id, day(15)).unwrap());
+        assert!(!store.complete_occurrence(&id, day(15)).unwrap());
+        assert!(
+            !store.complete_occurrence(&id, day(15) + 1).unwrap(),
+            "not an occurrence"
+        );
+        assert!(store.complete_occurrence(&id, day(14)).unwrap());
+        let now_task = task(&store);
+        assert_eq!(
+            (now_task.remind_at, now_task.done_ahead.len()),
+            (Some(day(17)), 0)
+        );
+        assert!(store.behind(at).is_empty());
+        // An old notification for a day already handled does nothing.
+        assert!(
+            !store
+                .apply_notification_action(&id, day(14), &complete, at)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn all_done_clears_the_misses_and_keeps_the_series_anchor() {
+        let mut store = Store::open(":memory:").unwrap();
+        let id = store
+            .save_task(None, repeating("2027-01-31T09:00:00Z", monthly()))
+            .unwrap();
+        let task = |store: &Store| store.snapshot().records[&id].task.clone().unwrap();
+        let now = ms("2027-04-02T00:00:00Z");
+        assert_eq!(task(&store).missed(now).unwrap().len(), 3);
+        assert!(store.complete_missed(&id, now).unwrap());
+        // 30 April, still counted from 31 January, so May is the 31st again.
+        assert_eq!(task(&store).remind_at, Some(ms("2027-04-30T08:00:00Z")));
+        assert_eq!(task(&store).repeat_from, Some(ms("2027-01-31T09:00:00Z")));
+        assert_eq!(
+            task(&store).ahead(now, 1).unwrap()[0],
+            ms("2027-05-31T08:00:00Z")
+        );
+        assert!(!store.complete_missed(&id, now).unwrap());
+    }
+
+    #[test]
+    fn a_series_delivers_and_snoozes_its_latest_occurrence() {
+        let mut store = Store::open(":memory:").unwrap();
+        let id = store
+            .save_task(None, repeating("2026-11-13T05:30:00Z", daily()))
+            .unwrap();
+        let monday = ms("2026-11-16T05:30:00Z");
+        store
+            .mark_notified(&id, ms("2026-11-13T05:30:00Z"))
+            .unwrap();
+        // Desktop delivery shows Monday's, once, rather than Friday's again.
+        let due = store.due(monday + 1000);
+        assert_eq!(due.iter().map(|d| d.2).collect::<Vec<_>>(), [monday]);
+        store.mark_notified(&id, monday).unwrap();
+        assert!(store.due(monday + 2000).is_empty());
+        // Snooze delays Monday's.
+        store.snooze(&id, monday + 2000, monday + 600_000).unwrap();
+        let record = store.snapshot().records[&id].clone();
+        assert_eq!(
+            record.due_at(monday + 3000),
+            Some((monday, monday + 600_000))
+        );
+        assert!(
+            store
+                .alarms(monday + 3000)
+                .unwrap()
+                .iter()
+                .any(|a| a.at == monday + 600_000 && a.remind_at == monday)
+        );
+        // Completing the snoozed alert marks Monday, not Friday.
+        let complete = alarms::NotificationAction::Complete;
+        assert!(
+            store
+                .apply_notification_action(&id, monday + 600_000, &complete, monday + 600_001)
+                .unwrap()
+        );
+        let task = store.snapshot().records[&id].task.clone().unwrap();
+        assert_eq!(task.done_ahead, [monday]);
+        assert_eq!(task.remind_at, Some(ms("2026-11-13T05:30:00Z")));
+    }
+
+    #[test]
+    fn a_missed_yearly_marker_still_warns_next_year() {
+        let mut store = Store::open(":memory:").unwrap();
+        let mut birthday = task();
+        birthday.remind_at = None;
+        birthday.kind = Some(entries::Kind::Marker);
+        birthday.date = Some("2025-11-01".into());
+        birthday.time_zone = Some("UTC".into());
+        birthday.warnings = vec![0];
+        birthday.repeat = Some(entries::Repeat::Calendar {
+            unit: entries::Unit::Year,
+            every: 1,
+            weekdays: vec![],
+        });
+        let id = store.save_task(None, birthday).unwrap();
+        let now = ms("2026-11-16T00:00:00Z");
+        let behind = store.behind(now);
+        assert_eq!(
+            behind[&id].missed,
+            [ms("2025-11-01T00:00:00Z"), ms("2026-11-01T00:00:00Z")]
+        );
+        assert!(
+            store
+                .alarms(now)
+                .unwrap()
+                .iter()
+                .any(|a| a.warning && a.at == ms("2027-11-01T09:00:00Z"))
+        );
+        // A marker's own day is not missed until it ends.
+        assert!(store.behind(ms("2025-11-01T23:00:00Z")).is_empty());
+    }
+
+    #[test]
+    fn editing_a_series_keeps_or_resets_what_is_done_ahead() {
+        let mut store = Store::open(":memory:").unwrap();
+        let id = store
+            .save_task(None, repeating("2026-11-13T05:30:00Z", daily()))
+            .unwrap();
+        store
+            .complete_occurrence(&id, ms("2026-11-15T05:30:00Z"))
+            .unwrap();
+        let task = |store: &Store| store.snapshot().records[&id].task.clone().unwrap();
+        // A title edit from an editor that left the field out keeps it.
+        let mut renamed = task(&store);
+        renamed.title = "Meds".into();
+        renamed.done_ahead.clear();
+        store.save_task(Some(id.clone()), renamed).unwrap();
+        assert_eq!(task(&store).done_ahead.len(), 1);
+        // Moving the series starts it again.
+        let mut moved = task(&store);
+        moved.remind_at = Some(ms("2026-11-13T06:00:00Z"));
+        store.save_task(Some(id.clone()), moved).unwrap();
+        assert!(task(&store).done_ahead.is_empty());
     }
 
     #[test]

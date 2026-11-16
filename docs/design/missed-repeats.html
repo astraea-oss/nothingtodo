@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NothingToDo — Missed repeats</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Doto:wght@500;700;900&family=Space+Grotesk:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+/* Tokens and deck chrome follow docs/design/ui-directions.html. */
+:root { --dot: 'Doto', 'Space Mono', monospace; --mono: 'Space Mono', ui-monospace, monospace; --sans: 'Space Grotesk', system-ui, sans-serif; --red: #d71921; }
+[data-theme=dark] { --deck: #050505; --deck-dot: #1c1c1c; --deck-fg: #f2f2f2; --deck-dim: #7a7a7a;
+  --bg: #000; --surface: #111; --surface2: #1a1a1a; --line: #2b2b2b; --fg: #fff; --dim: #8c8c8c; --faint: #4a4a4a; --edge: #2a2a2a; }
+[data-theme=light] { --deck: #e9e9e6; --deck-dot: #cfcfcb; --deck-fg: #111; --deck-dim: #6b6b6b;
+  --bg: #f4f4f2; --surface: #fff; --surface2: #ebebe8; --line: #d6d6d2; --fg: #000; --dim: #707070; --faint: #b4b4b0; --edge: #c9c9c5; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; background: var(--deck); color: var(--deck-fg); font-family: var(--sans); }
+body { background-image: radial-gradient(var(--deck-dot) 1px, transparent 1.3px); background-size: 14px 14px; }
+button { font: inherit; color: inherit; cursor: pointer; }
+
+.stage { position: fixed; left: 50%; top: 50%; width: 1600px; height: 900px; transform-origin: center; }
+.slide { position: absolute; inset: 0; padding: 72px 88px; display: flex; gap: 72px; opacity: 0; pointer-events: none; transition: opacity .35s ease, transform .35s ease; transform: translateY(8px); }
+.slide.on { opacity: 1; pointer-events: auto; transform: none; }
+.chrome { position: fixed; inset: auto 0 0 0; display: flex; justify-content: space-between; align-items: center; padding: 18px 28px; font: 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--deck-dim); }
+.chrome button { letter-spacing: inherit; background: none; border: 1px solid var(--deck-dim); border-radius: 99px; padding: 6px 14px; text-transform: uppercase; color: var(--deck-dim); }
+.chrome button:hover { color: var(--deck-fg); border-color: var(--deck-fg); }
+.pips { display: flex; gap: 8px; }
+.pips i { width: 7px; height: 7px; border-radius: 50%; border: 1px solid var(--deck-dim); cursor: pointer; }
+.pips i.on { background: var(--deck-fg); border-color: var(--deck-fg); }
+.count { font-family: var(--dot); font-weight: 700; font-size: 18px; letter-spacing: .05em; color: var(--deck-fg); }
+
+.copy { width: 560px; flex: none; display: flex; flex-direction: column; }
+.kicker { font: 12px var(--mono); letter-spacing: .2em; text-transform: uppercase; color: var(--deck-dim); }
+.num { font-family: var(--dot); font-weight: 900; font-size: 112px; line-height: .9; margin: 18px 0 10px; letter-spacing: -.02em; }
+.copy h2 { font-family: var(--dot); font-weight: 700; font-size: 54px; line-height: 1; }
+.lede { font-size: 17.5px; line-height: 1.5; margin: 16px 0 22px; max-width: 500px; }
+.facts { border-top: 1px solid var(--deck-dim); }
+.facts div { display: grid; grid-template-columns: 128px 1fr; gap: 16px; padding: 10px 0; border-bottom: 1px dotted var(--deck-dim); font-size: 14.5px; line-height: 1.4; }
+.facts dt { font: 10.5px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--deck-dim); padding-top: 3px; }
+.phones { flex: 1; display: flex; gap: 44px; justify-content: center; align-items: center; }
+.cap { font: 10.5px var(--mono); letter-spacing: .16em; text-transform: uppercase; color: var(--deck-dim); text-align: center; margin-top: 14px; }
+
+/* Cover */
+.cover { flex-direction: column; justify-content: space-between; }
+.cover h1 { font-family: var(--dot); font-weight: 900; font-size: 150px; line-height: .86; }
+.cover h1 .red { color: var(--red); }
+.cover .sub { font-size: 22px; max-width: 900px; line-height: 1.45; margin-top: 30px; }
+.toc { display: grid; grid-template-columns: repeat(3, 1fr); border-top: 1px solid var(--deck-fg); }
+.toc div { padding: 18px 20px 0 0; border-right: 1px dotted var(--deck-dim); margin-right: 20px; }
+.toc div:last-child { border: 0; }
+.toc b { font-family: var(--dot); font-size: 40px; display: block; }
+.toc span { font: 11px var(--mono); letter-spacing: .14em; text-transform: uppercase; }
+.toc p { font-size: 13.5px; color: var(--deck-dim); margin-top: 6px; line-height: 1.4; }
+
+/* Phone shell */
+.phone { width: 340px; height: 712px; border-radius: 46px; background: var(--bg); color: var(--fg); border: 1px solid var(--edge); outline: 6px solid var(--deck); box-shadow: 0 0 0 7px var(--edge); position: relative; overflow: hidden; }
+.sb { height: 38px; padding: 14px 26px 0; display: flex; justify-content: space-between; font: 500 12px var(--sans); }
+.sb .r { display: flex; gap: 5px; align-items: center; }
+.sb .r i { width: 5px; height: 5px; border-radius: 50%; background: var(--fg); }
+.home-ind { position: absolute; bottom: 8px; left: 50%; width: 110px; height: 4px; margin-left: -55px; border-radius: 4px; background: var(--fg); opacity: .8; }
+.lbl { font: 9.5px var(--mono); letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+.top { display: flex; justify-content: space-between; align-items: center; padding: 12px 18px 12px; border-bottom: 1px solid var(--line); }
+.top h3 { font: 900 26px/1 var(--dot); text-transform: uppercase; }
+
+/* Timeline */
+.band { height: 26px; display: flex; justify-content: space-between; align-items: center; padding: 0 16px; background: var(--surface2); }
+.band.red .lbl { color: var(--red); }
+.row { display: grid; grid-template-columns: 52px 20px 1fr auto; align-items: center; gap: 4px; padding: 8px 14px; min-height: 44px; border-bottom: 1px dotted var(--line); font-size: 14px; }
+.tm { font: 8.5px var(--mono); letter-spacing: .1em; color: var(--dim); line-height: 1.5; text-transform: uppercase; }
+.tm b { display: block; font: 700 11.5px var(--mono); letter-spacing: .04em; }
+.r { color: var(--red) !important; }
+.nd { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--fg); justify-self: center; }
+.nd.rd { border-color: var(--red); }
+.nd.ring { background: var(--fg); box-shadow: inset 0 0 0 2.5px var(--bg); }
+.tag { white-space: nowrap; display: inline-block; font: 7.5px var(--mono); letter-spacing: .14em; border: 1px solid var(--faint); border-radius: 4px; padding: 1px 4px; color: var(--dim); margin-left: 5px; vertical-align: 2px; }
+.tag.missed { color: var(--red); border-color: var(--red); }
+.ago { font: 9.5px var(--mono); color: var(--red); }
+.armed { font: 8px var(--mono); letter-spacing: .1em; color: var(--dim); }
+.detail { padding: 2px 14px 10px 84px; border-bottom: 1px dotted var(--line); background: var(--surface); }
+.miss { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px dotted var(--line); font: 10px var(--mono); letter-spacing: .06em; color: var(--red); }
+.miss:last-of-type { border-bottom: 0; }
+.tick { font: 8.5px var(--mono); letter-spacing: .1em; color: var(--dim); border: 1px solid var(--faint); border-radius: 99px; padding: 2px 8px; }
+.acts { display: flex; gap: 6px; margin-top: 6px; }
+.pill { font: 9px var(--mono); letter-spacing: .08em; border: 1.5px solid var(--fg); border-radius: 99px; padding: 4px 10px; }
+.pill.on { background: var(--fg); color: var(--bg); }
+.pill.ghost { border-color: var(--faint); color: var(--dim); }
+.now { display: grid; grid-template-columns: 52px 20px 1fr; gap: 4px; align-items: center; padding: 7px 14px; }
+.now .t { font: 700 10.5px var(--mono); color: var(--red); }
+.now i { width: 9px; height: 9px; border-radius: 50%; background: var(--red); justify-self: center; box-shadow: 0 0 0 4px color-mix(in srgb, var(--red) 25%, transparent); }
+.now hr { border: 0; border-top: 1px solid var(--red); }
+.notif { margin: 10px 12px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; }
+.notif .h { display: flex; justify-content: space-between; }
+.notif .t { font-size: 14px; margin: 6px 0 2px; }
+.notif .s { font-size: 11.5px; color: var(--dim); }
+.notif .btns { display: flex; gap: 18px; margin-top: 10px; font: 700 10px var(--mono); letter-spacing: .1em; }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+
+<section class="slide cover on">
+  <div>
+    <div class="kicker">NothingToDo · Timeline · missed repeats · 16 Nov 2026</div>
+    <h1 style="margin-top:42px">Still<br>ringing<span class="red">.</span></h1>
+    <p class="sub">A repeating reminder or alarm you miss today must still go off tomorrow, and the miss must not be forgotten. The series keeps ringing on schedule; every missed occurrence stays in Overdue until you mark it done or skip it. Nothing leaves on its own.</p>
+  </div>
+  <div class="toc">
+    <div><b>01</b><span>Overdue</span><p>One row per series, with its misses listed. The next occurrence is armed anyway.</p></div>
+    <div><b>02</b><span>Complete today</span><p>Today's notification marks only today. Older misses stay.</p></div>
+    <div><b>03</b><span>Rules</span><p>What syncs, what's derived, and what is never cleared automatically.</p></div>
+  </div>
+</section>
+
+<section class="slide">
+  <div class="copy">
+    <div class="kicker">Screen</div>
+    <div class="num">01</div>
+    <h2>Overdue</h2>
+    <p class="lede">A series shows once in Overdue, at its oldest open miss, with a MISSED count. Tap it to list each date. Meanwhile its next occurrence sits on its own day, armed, and rings as usual.</p>
+    <dl class="facts">
+      <div><dt>Done</dt><dd>Marks one missed date. The row moves to the next open miss.</dd></div>
+      <div><dt>All done</dt><dd>Marks every miss up to now.</dd></div>
+      <div><dt>Armed</dt><dd>A tag on the next occurrence while earlier ones are still open. Ticking it marks only that one.</dd></div>
+    </dl>
+  </div>
+  <div class="phones"><div>
+    <div class="phone">
+      <div class="sb"><span>00:33</span><span class="r"><i></i><i></i><i></i></span></div>
+      <div class="top"><h3>Mon 16</h3><span class="lbl">Nov 2026 · Wk 47</span></div>
+      <div class="band red"><span class="lbl">Overdue</span><span class="lbl">3</span></div>
+      <div class="row"><div class="tm">Sun 1<b class="r">09:00</b></div><div class="nd rd"></div><div>Set up Minecraft server?</div><div class="ago">-14d15</div></div>
+      <div class="row"><div class="tm">Fri 13<b class="r">05:30</b></div><div class="nd rd"></div><div>Take Meds<span class="tag missed">MISSED 3</span></div><div class="ago">-2d19</div></div>
+      <div class="detail">
+        <div class="miss"><span>FRI 13 · 05:30</span><span class="tick">DONE</span></div>
+        <div class="miss"><span>SAT 14 · 05:30</span><span class="tick">DONE</span></div>
+        <div class="miss"><span>SUN 15 · 05:30</span><span class="tick">DONE</span></div>
+        <div class="acts"><span class="pill on">All done</span></div>
+      </div>
+      <div class="row"><div class="tm">Sat 14<b class="r">05:10</b></div><div class="nd ring"></div><div>Wakeup<span class="tag">RINGS</span><span class="tag missed">MISSED 2</span></div><div class="ago">-1d19</div></div>
+      <div class="band"><span class="lbl">Today</span><span class="lbl">2</span></div>
+      <div class="now"><span class="t">00:33</span><i></i><hr></div>
+      <div class="row"><div class="tm"><b>05:10</b></div><div class="nd ring"></div><div>Wakeup<span class="tag">RINGS</span><span class="tag">ARMED</span></div><div class="armed">4h37</div></div>
+      <div class="row"><div class="tm"><b>05:30</b></div><div class="nd"></div><div>Take Meds<span class="tag">ARMED</span></div><div class="armed">4h57</div></div>
+      <div class="home-ind"></div>
+    </div>
+    <p class="cap">Mon 16, 00:33 · Take Meds expanded</p>
+  </div></div>
+</section>
+
+<section class="slide">
+  <div class="copy">
+    <div class="kicker">Screen</div>
+    <div class="num">02</div>
+    <h2>Complete today</h2>
+    <p class="lede">At 05:30 today's Take Meds goes off. Complete marks only today's occurrence; the three earlier misses stay listed. Handling them later skips straight past today, which is already done.</p>
+    <dl class="facts">
+      <div><dt>Notification</dt><dd>Complete and Snooze act on the occurrence that went off, however many are open.</dd></div>
+      <div><dt>Done ahead</dt><dd>Today is remembered as done while older misses are open, and synced.</dd></div>
+      <div><dt>Old buttons</dt><dd>A stale notification still marks the right date, never the next one.</dd></div>
+    </dl>
+  </div>
+  <div class="phones"><div>
+    <div class="phone">
+      <div class="sb"><span>05:31</span><span class="r"><i></i><i></i><i></i></span></div>
+      <div class="notif">
+        <div class="h"><span class="lbl">NothingToDo</span><span class="lbl">05:30</span></div>
+        <div class="t">Take Meds</div>
+        <div class="btns"><span>COMPLETE</span><span>SNOOZE 10M</span></div>
+      </div>
+      <div class="band red"><span class="lbl">Overdue</span><span class="lbl">2</span></div>
+      <div class="row"><div class="tm">Fri 13<b class="r">05:30</b></div><div class="nd rd"></div><div>Take Meds<span class="tag missed">MISSED 3</span></div><div class="ago">-3d</div></div>
+      <div class="row"><div class="tm">Sat 14<b class="r">05:10</b></div><div class="nd ring"></div><div>Wakeup<span class="tag">RINGS</span><span class="tag missed">MISSED 2</span></div><div class="ago">-2d</div></div>
+      <div class="band"><span class="lbl">Tomorrow · Tue 17</span><span class="lbl">2</span></div>
+      <div class="row"><div class="tm"><b>05:10</b></div><div class="nd ring"></div><div>Wakeup<span class="tag">RINGS</span><span class="tag">ARMED</span></div><div class="armed">23h39</div></div>
+      <div class="row"><div class="tm"><b>05:30</b></div><div class="nd"></div><div>Take Meds<span class="tag">ARMED</span></div><div class="armed">23h59</div></div>
+      <div class="home-ind"></div>
+    </div>
+    <p class="cap">Mon 16, 05:31 · after Complete</p>
+  </div></div>
+</section>
+
+<section class="slide">
+  <div class="copy">
+    <div class="kicker">Behaviour</div>
+    <div class="num">03</div>
+    <h2>Rules</h2>
+    <p class="lede">Ringing and remembering are separate. The stored occurrence stays the oldest open one; the next one to ring is worked out from the clock on each device.</p>
+  </div>
+  <div class="copy" style="width:auto;flex:1;justify-content:center">
+    <dl class="facts">
+      <div><dt>Ringing</dt><dd>A series whose stored occurrence has passed also arms its next future occurrence and that occurrence's warnings. Past ones are never re-fired, so a long absence can't cause a burst.</dd></div>
+      <div><dt>Synced</dt><dd>The oldest open occurrence, as today, plus a short list of occurrences already done ahead of it. Only your actions write these.</dd></div>
+      <div><dt>Derived</dt><dd>The missed count and the next armed occurrence. Every device computes them the same way, so nothing is written behind your back.</dd></div>
+      <div><dt>Never</dt><dd>A miss is never cleared by time passing, on any device.</dd></div>
+      <div><dt>Kinds</dt><dd>Reminders, alarms and markers alike.</dd></div>
+      <div><dt>Linux</dt><dd>Delivery, alarms included, still needs the running tray app.</dd></div>
+    </dl>
+  </div>
+</section>
+
+</div>
+<div class="chrome">
+  <span class="count" id="count">01 / 04</span>
+  <div class="pips" id="pips"></div>
+  <span><button id="theme">T · Light / dark</button> &nbsp;← → to move</span>
+</div>
+
+<script>
+if (matchMedia('(prefers-color-scheme: light)').matches) document.documentElement.dataset.theme = 'light';
+const two = n => String(n).padStart(2, '0');
+// Deck navigation, as in ui-directions.html.
+const slides = [...document.querySelectorAll('.slide')];
+const pips = document.getElementById('pips');
+let at = 0;
+slides.forEach((_, i) => { const p = document.createElement('i'); p.onclick = () => show(i); pips.append(p); });
+function show(i) {
+  at = Math.max(0, Math.min(slides.length - 1, i));
+  slides.forEach((s, j) => s.classList.toggle('on', j === at));
+  [...pips.children].forEach((p, j) => p.classList.toggle('on', j === at));
+  document.getElementById('count').textContent = `${two(at + 1)} / ${two(slides.length)}`;
+}
+function fit() {
+  const scale = Math.min(innerWidth / 1600, (innerHeight - 40) / 900);
+  document.getElementById('stage').style.transform = `translate(-50%, -50%) scale(${scale})`;
+}
+const theme = () => { const r = document.documentElement; r.dataset.theme = r.dataset.theme === 'dark' ? 'light' : 'dark'; };
+document.getElementById('theme').onclick = theme;
+addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === ' ') show(at + 1);
+  if (e.key === 'ArrowLeft') show(at - 1);
+  if (e.key.toLowerCase() === 't') theme();
+});
+addEventListener('resize', fit);
+fit(); show(0);
+</script>
+</body>
+</html>
