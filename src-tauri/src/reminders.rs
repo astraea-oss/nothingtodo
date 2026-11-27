@@ -247,6 +247,7 @@ pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
             let _ = app
                 .notification()
                 .builder()
+                .icon(app.config().identifier.as_str())
                 .title(TITLE)
                 .body(&title)
                 .show();
@@ -256,6 +257,7 @@ pub async fn run(app: AppHandle, _requests: mpsc::Receiver<()>) {
             let shown = app
                 .notification()
                 .builder()
+                .icon(app.config().identifier.as_str())
                 .title(TITLE)
                 .body(&task.title)
                 .action_type_id(actions::TYPE)
@@ -356,6 +358,7 @@ pub mod ring {
             let _ = app
                 .notification()
                 .builder()
+                .icon(app.config().identifier.as_str())
                 .title("NothingToDo alarm")
                 .body(title)
                 .show();
